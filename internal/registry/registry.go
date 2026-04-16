@@ -56,8 +56,8 @@ func CheckUpdate(ctx context.Context, imageRef string, localDigest string) Check
 		return result
 	}
 
-	// Fetch remote descriptor (just the manifest digest, not the full image).
-	desc, err := remote.Get(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
+	// HEAD request — gets the digest without counting as a pull on Docker Hub.
+	desc, err := remote.Head(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
 	if err != nil {
 		result.Status = CheckFailed
 		result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)

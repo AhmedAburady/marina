@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const CacheTTL = 1 * time.Hour
+const CacheTTL = 30 * time.Minute
 
 // CacheEntry holds a single cached registry check result.
 type CacheEntry struct {
