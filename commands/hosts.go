@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/AhmedAburady/marina/internal/config"
+	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -38,25 +39,29 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 		return nil
 	}
 
-	cmd.Printf("%-20s  %-16s  %-16s  %s\n", "NAME", "USER", "ADDRESS", "KEY")
-	cmd.Printf("%-20s  %-16s  %-16s  %s\n", strings.Repeat("─", 20), strings.Repeat("─", 16), strings.Repeat("─", 16), strings.Repeat("─", 20))
+	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY")
+
 	for name, h := range cfg.Hosts {
 		var userDisplay string
 		if h.User != "" {
 			userDisplay = h.User
 		} else if cfg.Settings.Username != "" {
-			userDisplay = "(global: " + cfg.Settings.Username + ")"
+			userDisplay = cfg.Settings.Username + " (global)"
 		} else {
 			userDisplay = "(none)"
 		}
 		var keyDisplay string
 		if h.SSHKey != "" {
 			keyDisplay = h.SSHKey
+		} else if cfg.Settings.SSHKey != "" {
+			keyDisplay = cfg.Settings.SSHKey + " (global)"
 		} else {
-			keyDisplay = "(global)"
+			keyDisplay = "(none)"
 		}
-		cmd.Printf("%-20s  %-16s  %-16s  %s\n", name, userDisplay, h.Address, keyDisplay)
+		t.Row(name, userDisplay, h.Address, keyDisplay)
 	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), t.String())
 	return nil
 }
 
@@ -66,7 +71,7 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 		Use:   "add <name> <address>",
 		Short: "Add a remote Docker host",
 		Example: `  marina hosts add gmktec 10.0.0.50
-  marina hosts add pve-arr ahmed@10.0.0.51
+  marina hosts add pve-arr user@10.0.0.51
   marina hosts add synology root@synology.tail
   marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa`,
 		Args: cobra.ExactArgs(2),
@@ -114,28 +119,39 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 
 func newHostsRemoveCmd(gf *GlobalFlags) *cobra.Command {
 	return &cobra.Command{
-		Use:     "remove <name>",
+		Use:     "remove <name> [name...]",
 		Aliases: []string{"rm"},
-		Short:   "Remove a remote Docker host",
-		Args:    cobra.ExactArgs(1),
+		Short:   "Remove one or more remote Docker hosts",
+		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name := args[0]
-
 			cfg, err := config.Load(gf.Config)
 			if err != nil {
 				return err
 			}
 
-			if _, exists := cfg.Hosts[name]; !exists {
-				return fmt.Errorf("host %q not found", name)
+			var notFound []string
+			var removed []string
+			for _, name := range args {
+				if _, exists := cfg.Hosts[name]; !exists {
+					notFound = append(notFound, name)
+					continue
+				}
+				delete(cfg.Hosts, name)
+				removed = append(removed, name)
 			}
 
-			delete(cfg.Hosts, name)
-			if err := config.Save(cfg, gf.Config); err != nil {
-				return err
+			if len(removed) > 0 {
+				if err := config.Save(cfg, gf.Config); err != nil {
+					return err
+				}
+				for _, name := range removed {
+					cmd.Printf("Removed host %q\n", name)
+				}
 			}
 
-			cmd.Printf("Removed host %q\n", name)
+			if len(notFound) > 0 {
+				return fmt.Errorf("host(s) not found: %s", strings.Join(notFound, ", "))
+			}
 			return nil
 		},
 	}

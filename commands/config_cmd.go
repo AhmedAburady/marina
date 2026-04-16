@@ -81,7 +81,13 @@ func newConfigSetCmd(gf *GlobalFlags) *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <key> <value>",
 		Short: "Set a config value",
-		Example: `  marina config set username ahmed`,
+		Long: `Set a global config value.
+
+Available keys:
+  username    Global default SSH username for all hosts
+  ssh_key     Global default SSH key path`,
+		Example: `  marina config set username myuser
+  marina config set ssh_key ~/.ssh/id_ed25519`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := args[0], args[1]
@@ -104,7 +110,7 @@ func newConfigSetCmd(gf *GlobalFlags) *cobra.Command {
 				return err
 			}
 
-			cmd.Printf("Set %s = %q\n", key, value)
+			cmd.Printf("%s has been set successfully to %q\n", key, value)
 			return nil
 		},
 	}

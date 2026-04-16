@@ -13,22 +13,31 @@ import (
 	"github.com/docker/docker/api/types/container"
 )
 
-// headerStyle is applied to every column header cell.
-var headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+var (
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	cellStyle   = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
+	borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+)
+
+// StyledTable returns a pre-configured table with rounded borders and padding.
+func StyledTable(headers ...string) *table.Table {
+	return table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(borderStyle).
+		BorderHeader(true).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == table.HeaderRow {
+				return headerStyle.PaddingLeft(1).PaddingRight(1)
+			}
+			return cellStyle
+		}).
+		Headers(headers...)
+}
 
 // PrintContainerTable writes a styled table of containers to w.
 // Columns: HOST | NAME | IMAGE | STATUS | PORTS
 func PrintContainerTable(w io.Writer, host string, containers []container.Summary) {
-	t := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderHeader(true).
-		StyleFunc(func(row, col int) lipgloss.Style {
-			if row == table.HeaderRow {
-				return headerStyle
-			}
-			return lipgloss.NewStyle()
-		}).
-		Headers("HOST", "NAME", "IMAGE", "STATUS", "PORTS")
+	t := StyledTable("HOST", "NAME", "IMAGE", "STATUS", "PORTS")
 
 	for _, c := range containers {
 		name := containerName(c)
@@ -43,16 +52,7 @@ func PrintContainerTable(w io.Writer, host string, containers []container.Summar
 // PrintStackTable writes a styled table of compose stacks to w.
 // Columns: HOST | STACK | DIR | CONTAINERS
 func PrintStackTable(w io.Writer, stacks []discovery.Stack) {
-	t := table.New().
-		Border(lipgloss.NormalBorder()).
-		BorderHeader(true).
-		StyleFunc(func(row, col int) lipgloss.Style {
-			if row == table.HeaderRow {
-				return headerStyle
-			}
-			return lipgloss.NewStyle()
-		}).
-		Headers("HOST", "STACK", "DIR", "CONTAINERS")
+	t := StyledTable("HOST", "STACK", "DIR", "CONTAINERS")
 
 	for _, s := range stacks {
 		t.Row(s.Host, s.Name, s.Dir, strconv.Itoa(len(s.Containers)))
