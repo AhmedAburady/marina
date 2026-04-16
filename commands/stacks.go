@@ -6,8 +6,10 @@ import (
 	"strings"
 	"sync"
 
+	"charm.land/huh/v2"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/discovery"
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/state"
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/docker/docker/api/types/container"
@@ -27,6 +29,7 @@ func newStacksCmd(gf *GlobalFlags) *cobra.Command {
 	cmd.AddCommand(
 		newStacksAddCmd(gf),
 		newStacksRemoveCmd(gf),
+		newStacksPurgeCmd(gf),
 	)
 
 	return cmd
@@ -226,4 +229,107 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 		ui.PrintStackTable(cmd.OutOrStdout(), allStacks)
 	}
 	return nil
+}
+
+func newStacksPurgeCmd(gf *GlobalFlags) *cobra.Command {
+	return &cobra.Command{
+		Use:   "purge",
+		Short: "Completely remove a stack: stop containers, delete files, remove from config",
+		Long: `Purge fully removes a stack from a remote host:
+
+  1. Runs docker compose down to stop and remove containers
+  2. Deletes the stack directory (compose file and all contents)
+  3. Removes the stack from marina config (if registered)
+
+This action is IRREVERSIBLE. The stack directory and all its files will be permanently deleted.`,
+		Example: `  marina stacks purge -H myhost -s mystack`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if gf.Host == "" {
+				return fmt.Errorf("host is required: use -H <host>")
+			}
+			if gf.Stack == "" {
+				return fmt.Errorf("stack is required: use -s <stack>")
+			}
+
+			hc, err := resolveHost(gf)
+			if err != nil {
+				return err
+			}
+
+			// Resolve the stack directory.
+			dir, err := findStackDir(cmd.Context(), hc, gf.Stack)
+			if err != nil {
+				return err
+			}
+
+			// Show warning and confirm.
+			warning := fmt.Sprintf(
+				"This will PERMANENTLY:\n\n"+
+					"  1. Stop and remove all containers in stack %q\n"+
+					"  2. Delete directory %s on %s\n"+
+					"  3. Remove %q from marina config (if registered)\n\n"+
+					"This cannot be undone. Continue?",
+				gf.Stack, dir, gf.Host, gf.Stack,
+			)
+
+			var confirmed bool
+			if err := huh.NewForm(
+				huh.NewGroup(
+					huh.NewConfirm().
+						Title(warning).
+						Value(&confirmed),
+				),
+			).Run(); err != nil {
+				return err
+			}
+			if !confirmed {
+				cmd.Println("Aborted.")
+				return nil
+			}
+
+			w := cmd.OutOrStdout()
+			ctx := cmd.Context()
+
+			// Step 1: docker compose down
+			err = execWithSpinner(ctx, w, hc,
+				fmt.Sprintf("Stopping stack %s on %s...", gf.Stack, gf.Host),
+				fmt.Sprintf("cd %s && docker compose down --remove-orphans", dir),
+				fmt.Sprintf("Stack %q stopped and containers removed", gf.Stack),
+			)
+			if err != nil {
+				return fmt.Errorf("compose down failed: %w", err)
+			}
+
+			// Step 2: delete the stack directory
+			err = execWithSpinner(ctx, w, hc,
+				fmt.Sprintf("Deleting %s on %s...", dir, gf.Host),
+				fmt.Sprintf("rm -rf %s", dir),
+				fmt.Sprintf("Directory %s deleted", dir),
+			)
+			if err != nil {
+				return fmt.Errorf("delete directory failed: %w", err)
+			}
+
+			// Step 3: remove from config if registered
+			cfg, err := config.Load(gf.Config)
+			if err == nil {
+				if h, ok := cfg.Hosts[gf.Host]; ok && h.Stacks != nil {
+					if _, registered := h.Stacks[gf.Stack]; registered {
+						delete(h.Stacks, gf.Stack)
+						if err := config.Save(cfg, gf.Config); err != nil {
+							fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not update config: %v\n", err)
+						} else {
+							cmd.Printf("Removed %q from config\n", gf.Stack)
+						}
+					}
+				}
+			}
+
+			// Step 4: prune dangling images left behind
+			_, _ = internalssh.Exec(ctx, hc.sshCfg, "docker image prune -f")
+
+			cmd.Printf("\nStack %q purged from %s\n", gf.Stack, gf.Host)
+			return nil
+		},
+	}
 }

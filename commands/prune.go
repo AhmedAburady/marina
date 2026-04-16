@@ -13,30 +13,34 @@ import (
 )
 
 func newPruneCmd(gf *GlobalFlags) *cobra.Command {
-	var images, volumes, system, force bool
+	var imagesOnly, imagesAll, volumes, force bool
 
 	cmd := &cobra.Command{
 		Use:   "prune",
 		Short: "Remove unused Docker resources on remote hosts",
 		Example: `  marina prune -H myhost
-  marina prune --all --images
+  marina prune -H myhost --images-only
+  marina prune -H myhost --images-all
   marina prune -H myhost --volumes -y`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runPrune(cmd, gf, images, volumes, system, force)
+			return runPrune(cmd, gf, imagesOnly, imagesAll, volumes, force)
 		},
 	}
 
-	cmd.Flags().BoolVar(&images, "images", false, "Prune dangling images only")
-	cmd.Flags().BoolVar(&volumes, "volumes", false, "Prune unused volumes only")
-	cmd.Flags().BoolVar(&system, "system", false, "Full system prune (default)")
+	cmd.Flags().BoolVar(&imagesOnly, "images-only", false, "Prune dangling (untagged) images only")
+	cmd.Flags().BoolVar(&imagesAll, "images-all", false, "Prune all unused images (dangling + tagged)")
+	cmd.Flags().BoolVar(&volumes, "volumes", false, "Prune unused volumes")
 	cmd.Flags().BoolVarP(&force, "force", "y", false, "Skip confirmation prompt")
 	return cmd
 }
 
 // pruneCommand returns the docker command string based on the chosen flags.
 // Defaults to system prune when no specific resource flag is set.
-func pruneCommand(images, volumes bool) string {
-	if images {
+func pruneCommand(imagesOnly, imagesAll, volumes bool) string {
+	if imagesAll {
+		return "docker image prune -af"
+	}
+	if imagesOnly {
 		return "docker image prune -f"
 	}
 	if volumes {
@@ -45,11 +49,11 @@ func pruneCommand(images, volumes bool) string {
 	return "docker system prune -f"
 }
 
-func runPrune(cmd *cobra.Command, gf *GlobalFlags, images, volumes, system, force bool) error {
+func runPrune(cmd *cobra.Command, gf *GlobalFlags, imagesOnly, imagesAll, volumes, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	dockerCmd := pruneCommand(images, volumes)
+	dockerCmd := pruneCommand(imagesOnly, imagesAll, volumes)
 
 	// ── Resolve target hosts ──────────────────────────────────────────────────
 	var targets []*hostContext
@@ -116,7 +120,15 @@ func runPrune(cmd *cobra.Command, gf *GlobalFlags, images, volumes, system, forc
 		for _, hc := range targets {
 			names = append(names, hc.name)
 		}
-		title := fmt.Sprintf("Prune resources on %s?", strings.Join(names, ", "))
+		what := "stopped containers, unused networks, dangling images, build cache"
+		if imagesAll {
+			what = "all unused images (dangling + tagged)"
+		} else if imagesOnly {
+			what = "dangling images"
+		} else if volumes {
+			what = "unused volumes"
+		}
+		title := fmt.Sprintf("Prune %s on %s?", what, strings.Join(names, ", "))
 
 		var confirmed bool
 		err := huh.NewForm(
