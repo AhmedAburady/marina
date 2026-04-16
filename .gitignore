@@ -1,0 +1,24 @@
+# Binary (root only, not cmd/marina/)
+/marina
+scratchpad/
+# Build artifacts
+dist/
+*.exe
+
+# Go test cache and coverage
+*.test
+*.out
+coverage.html
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+.firecrawl/
+# Environment
+.env
+.env.local
+.agents/
+

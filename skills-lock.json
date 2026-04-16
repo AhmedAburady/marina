@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "golang-code-style": {
+      "source": "samber/cc-skills-golang",
+      "sourceType": "github",
+      "computedHash": "e3341069649f8d2dad56efba400508e553061d9b3238336cdf89ad3f07ad42e1"
+    },
+    "golang-performance": {
+      "source": "samber/cc-skills-golang",
+      "sourceType": "github",
+      "computedHash": "6b3747c11aeca15ac45ad4bf603ddab14f6ced040257b4ccb5cb181d7fbd8a69"
+    }
+  }
+}
