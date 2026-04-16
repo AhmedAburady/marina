@@ -4,12 +4,15 @@ package ui
 import (
 	"fmt"
 	"io"
+	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
 	"github.com/AhmedAburady/marina/internal/discovery"
+	"github.com/charmbracelet/x/term"
 	"github.com/docker/docker/api/types/container"
 )
 
@@ -19,12 +22,24 @@ var (
 	borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )
 
-// StyledTable returns a pre-configured table with rounded borders and padding.
+// termWidth returns the current terminal width, falling back to 80 if it
+// cannot be determined (e.g. when stdout is not a TTY).
+func termWidth() int {
+	w, _, err := term.GetSize(os.Stdout.Fd())
+	if err != nil || w <= 0 {
+		return 80
+	}
+	return w
+}
+
+// StyledTable returns a pre-configured table with rounded borders and padding,
+// constrained to the current terminal width.
 func StyledTable(headers ...string) *table.Table {
 	return table.New().
 		Border(lipgloss.RoundedBorder()).
 		BorderStyle(borderStyle).
 		BorderHeader(true).
+		Width(termWidth()).
 		StyleFunc(func(row, col int) lipgloss.Style {
 			if row == table.HeaderRow {
 				return headerStyle.PaddingLeft(1).PaddingRight(1)
@@ -86,4 +101,42 @@ func formatPorts(ports []container.Port) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// newPlainWriter returns a tabwriter that aligns columns with consistent padding.
+func newPlainWriter(w io.Writer) *tabwriter.Writer {
+	// minwidth=0, tabwidth=4, padding=3, padchar=' '
+	return tabwriter.NewWriter(w, 0, 4, 3, ' ', 0)
+}
+
+// PrintContainerTablePlain writes containers as aligned columns with a header.
+func PrintContainerTablePlain(w io.Writer, host string, containers []container.Summary) {
+	tw := newPlainWriter(w)
+	fmt.Fprintln(tw, "HOST\tNAME\tIMAGE\tSTATUS\tPORTS")
+	for _, c := range containers {
+		name := containerName(c)
+		ports := formatPorts(c.Ports)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", host, name, c.Image, c.Status, ports)
+	}
+	tw.Flush()
+}
+
+// PrintStackTablePlain writes stacks as aligned columns with a header.
+func PrintStackTablePlain(w io.Writer, stacks []discovery.Stack) {
+	tw := newPlainWriter(w)
+	fmt.Fprintln(tw, "HOST\tSTACK\tDIR\tCONTAINERS")
+	for _, s := range stacks {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", s.Host, s.Name, s.Dir, len(s.Containers))
+	}
+	tw.Flush()
+}
+
+// PrintHostTablePlain writes hosts as aligned columns with a header.
+func PrintHostTablePlain(w io.Writer, rows [][]string) {
+	tw := newPlainWriter(w)
+	fmt.Fprintln(tw, "NAME\tUSER\tADDRESS\tKEY")
+	for _, row := range rows {
+		fmt.Fprintln(tw, strings.Join(row, "\t"))
+	}
+	tw.Flush()
 }

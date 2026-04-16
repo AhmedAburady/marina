@@ -39,8 +39,8 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 		return nil
 	}
 
-	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY")
-
+	// Build rows first so we can choose the output format afterwards.
+	var rows [][]string
 	for name, h := range cfg.Hosts {
 		var userDisplay string
 		if h.User != "" {
@@ -58,9 +58,18 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 		} else {
 			keyDisplay = "(none)"
 		}
-		t.Row(name, userDisplay, h.Address, keyDisplay)
+		rows = append(rows, []string{name, userDisplay, h.Address, keyDisplay})
 	}
 
+	if gf.Plain {
+		ui.PrintHostTablePlain(cmd.OutOrStdout(), rows)
+		return nil
+	}
+
+	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY")
+	for _, row := range rows {
+		t.Row(row...)
+	}
 	fmt.Fprintln(cmd.OutOrStdout(), t.String())
 	return nil
 }

@@ -54,16 +54,16 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 
 	for name, h := range targets {
 		wg.Add(1)
-		go func(name, address string, hostCfg *config.HostConfig) {
+		go func(name, address, sshKey string, hostCfg *config.HostConfig) {
 			defer wg.Done()
-			containers, err := fetchContainers(cmd.Context(), address)
+			containers, err := fetchContainers(cmd.Context(), address, sshKey)
 			if err != nil {
 				results <- hostStacks{host: name, err: fmt.Errorf("connect or list: %w", err)}
 				return
 			}
 			stacks := discovery.GroupByStack(name, containers, hostCfg.Stacks)
 			results <- hostStacks{host: name, stacks: stacks}
-		}(name, h.SSHAddress(cfg.Settings.Username), h)
+		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey), h)
 	}
 
 	go func() {
@@ -86,6 +86,10 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 		return nil
 	}
 
-	ui.PrintStackTable(cmd.OutOrStdout(), allStacks)
+	if gf.Plain {
+		ui.PrintStackTablePlain(cmd.OutOrStdout(), allStacks)
+	} else {
+		ui.PrintStackTable(cmd.OutOrStdout(), allStacks)
+	}
 	return nil
 }

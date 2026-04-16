@@ -56,11 +56,11 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 
 	for name, h := range targets {
 		wg.Add(1)
-		go func(name, address string) {
+		go func(name, address, sshKey string) {
 			defer wg.Done()
-			containers, err := fetchContainers(cmd.Context(), address)
+			containers, err := fetchContainers(cmd.Context(), address, sshKey)
 			results <- hostContainers{host: name, containers: containers, err: err}
-		}(name, h.SSHAddress(cfg.Settings.Username))
+		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
 	}
 
 	// Close the channel once all goroutines are done.
@@ -76,7 +76,11 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", r.host, r.err)
 			continue
 		}
-		ui.PrintContainerTable(cmd.OutOrStdout(), r.host, r.containers)
+		if gf.Plain {
+			ui.PrintContainerTablePlain(cmd.OutOrStdout(), r.host, r.containers)
+		} else {
+			ui.PrintContainerTable(cmd.OutOrStdout(), r.host, r.containers)
+		}
 		hasResults = true
 	}
 
@@ -86,8 +90,8 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 	return nil
 }
 
-func fetchContainers(ctx context.Context, address string) ([]container.Summary, error) {
-	c, err := docker.NewClient(ctx, address)
+func fetchContainers(ctx context.Context, address, sshKey string) ([]container.Summary, error) {
+	c, err := docker.NewClient(ctx, address, sshKey)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

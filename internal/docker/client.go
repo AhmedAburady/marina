@@ -1,12 +1,14 @@
 // Package docker provides a thin wrapper around the Docker Engine API client.
-// Each host gets its own Client connected via SSH transport — the Docker SDK
-// handles the SSH tunnel natively through the "ssh://" scheme.
+// Connections to remote hosts use Docker CLI's connhelper, which runs
+// "ssh <host> docker system dial-stdio" under the hood.
 package docker
 
 import (
 	"context"
 	"fmt"
+	"net/http"
 
+	"github.com/docker/cli/cli/connhelper"
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
 )
@@ -17,11 +19,31 @@ type Client struct {
 }
 
 // NewClient creates a Docker client connected to the given SSH address
-// (e.g. "ssh://user@10.0.0.50"). API version negotiation is enabled so
-// marina works against any Docker Engine version the remote host runs.
-func NewClient(ctx context.Context, address string) (*Client, error) {
+// (e.g. "ssh://user@10.0.0.50"). It uses Docker CLI's connhelper which
+// shells out to the local ssh binary — the battle-tested production path.
+//
+// sshKeyPath is optional — when non-empty, it is passed as -i to ssh.
+func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client, error) {
+	var sshFlags []string
+	if sshKeyPath != "" {
+		sshFlags = append(sshFlags, "-i", sshKeyPath)
+	}
+
+	helper, err := connhelper.GetConnectionHelperWithSSHOpts(address, sshFlags)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connection helper for %s: %w", address, err)
+	}
+
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			DialContext: helper.Dialer,
+		},
+	}
+
 	inner, err := dockerclient.NewClientWithOpts(
-		dockerclient.WithHost(address),
+		dockerclient.WithHTTPClient(httpClient),
+		dockerclient.WithHost(helper.Host),
+		dockerclient.WithDialContext(helper.Dialer),
 		dockerclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
