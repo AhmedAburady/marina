@@ -227,19 +227,36 @@ func runCheckCmd(cmd *cobra.Command, gf *GlobalFlags, notify bool) error {
 			return collectErr
 		}
 
-		sort.Slice(allResults, func(i, j int) bool {
-			if allResults[i].Host != allResults[j].Host {
-				return allResults[i].Host < allResults[j].Host
+		// Default: only show "update available". --all shows everything.
+		var filtered []updateInfo
+		if gf.All {
+			filtered = allResults
+		} else {
+			for _, r := range allResults {
+				if r.Result.Status == registry.UpdateAvailable {
+					filtered = append(filtered, r)
+				}
 			}
-			if allResults[i].Stack != allResults[j].Stack {
-				return allResults[i].Stack < allResults[j].Stack
+		}
+
+		sort.Slice(filtered, func(i, j int) bool {
+			if filtered[i].Host != filtered[j].Host {
+				return filtered[i].Host < filtered[j].Host
 			}
-			return allResults[i].Container < allResults[j].Container
+			if filtered[i].Stack != filtered[j].Stack {
+				return filtered[i].Stack < filtered[j].Stack
+			}
+			return filtered[i].Container < filtered[j].Container
 		})
+
+		if len(filtered) == 0 {
+			cmd.Println("No updates available.")
+			return nil
+		}
 
 		var hostOrder []string
 		grouped := make(map[string][]updateInfo)
-		for _, r := range allResults {
+		for _, r := range filtered {
 			if _, seen := grouped[r.Host]; !seen {
 				hostOrder = append(hostOrder, r.Host)
 			}
@@ -540,7 +557,8 @@ func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[strin
 }
 
 // listCandidatesFromHost connects to one host and returns all containers as
-// UpdateCandidate entries, without performing any registry checks.
+// UpdateCandidate entries. Inspects each unique image (not each container)
+// to minimize Docker API calls over the SSH pipe.
 func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey string) ([]ui.UpdateCandidate, error) {
 	dc, err := docker.NewClient(ctx, address, sshKey)
 	if err != nil {
@@ -553,12 +571,39 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 
+	// Inspect each unique image concurrently — transport serializes via MaxConnsPerHost: 1.
+	type imageInfo struct{ ref, digest string }
+	cache := make(map[string]imageInfo)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	seen := make(map[string]bool)
+	for _, c := range containers {
+		if seen[c.ImageID] {
+			continue
+		}
+		seen[c.ImageID] = true
+		wg.Add(1)
+		go func(id, fallbackImage string, cID string) {
+			defer wg.Done()
+			ref, digest, err := dc.InspectContainer(ctx, cID)
+			mu.Lock()
+			if err != nil {
+				cache[id] = imageInfo{ref: fallbackImage}
+			} else {
+				cache[id] = imageInfo{ref: ref, digest: digest}
+			}
+			mu.Unlock()
+		}(c.ImageID, c.Image, c.ID)
+	}
+	wg.Wait()
+
 	out := make([]ui.UpdateCandidate, 0, len(containers))
 	for _, c := range containers {
-		// Inspect each container sequentially (SSH can't handle concurrent requests)
-		imageRef, digest, _ := dc.InspectContainer(ctx, c.ID)
-		if imageRef == "" {
-			imageRef = c.Image
+		info := cache[c.ImageID]
+		ref := info.ref
+		if ref == "" {
+			ref = c.Image
 		}
 		out = append(out, ui.UpdateCandidate{
 			Host:        hostName,
@@ -566,8 +611,8 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 			Container:   containerDisplayName(c.Names, c.ID),
 			ContainerID: c.ID,
 			Image:       c.Image,
-			ImageRef:    imageRef,
-			Digest:      digest,
+			ImageRef:    ref,
+			Digest:      info.digest,
 			Dir:         c.Labels["com.docker.compose.project.working_dir"],
 		})
 	}
@@ -618,8 +663,8 @@ func gatherUpdateInfo(ctx context.Context, cfg *config.Config, targets map[strin
 	return all, firstErr
 }
 
-// checkHostUpdates connects to a single host, lists all containers, inspects
-// each one, and calls the registry checker.
+// checkHostUpdates connects to a single host, inspects unique images and
+// checks registries — all concurrent (transport serializes SSH automatically).
 func checkHostUpdates(ctx context.Context, hostName, address, sshKey string) ([]updateInfo, error) {
 	dc, err := docker.NewClient(ctx, address, sshKey)
 	if err != nil {
@@ -632,34 +677,51 @@ func checkHostUpdates(ctx context.Context, hostName, address, sshKey string) ([]
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 
+	// Inspect each unique image concurrently — transport serializes via MaxConnsPerHost: 1.
+	type imageInfo struct{ ref, digest string }
+	imgCache := make(map[string]imageInfo)
+	var imgMu sync.Mutex
+	var imgWg sync.WaitGroup
+
+	seen := make(map[string]bool)
+	for _, c := range containers {
+		if seen[c.ImageID] {
+			continue
+		}
+		seen[c.ImageID] = true
+		imgWg.Add(1)
+		go func(imgID, fallback, cID string) {
+			defer imgWg.Done()
+			ref, digest, err := dc.InspectContainer(ctx, cID)
+			imgMu.Lock()
+			if err != nil {
+				imgCache[imgID] = imageInfo{ref: fallback}
+			} else {
+				imgCache[imgID] = imageInfo{ref: ref, digest: digest}
+			}
+			imgMu.Unlock()
+		}(c.ImageID, c.Image, c.ID)
+	}
+	imgWg.Wait()
+
+	// Registry checks run in parallel (plain HTTP, no SSH).
 	type indexedResult struct {
 		idx  int
 		info updateInfo
 	}
-
 	results := make(chan indexedResult, len(containers))
 	var wg sync.WaitGroup
 
 	for i, c := range containers {
-		wg.Add(1)
-		go func(idx int, c container.Summary) {
-			defer wg.Done()
+		info := imgCache[c.ImageID]
+		imageRef := info.ref
+		if imageRef == "" {
+			imageRef = c.Image
+		}
 
-			imageRef, digest, inspectErr := dc.InspectContainer(ctx, c.ID)
-			if inspectErr != nil {
-				results <- indexedResult{idx, updateInfo{
-					Host:      hostName,
-					Stack:     stackLabel(c.Labels),
-					Container: containerDisplayName(c.Names, c.ID),
-					Image:     c.Image,
-					Result: registry.CheckResult{
-						Image:  c.Image,
-						Status: registry.CheckFailed,
-						Error:  inspectErr,
-					},
-				}}
-				return
-			}
+		wg.Add(1)
+		go func(idx int, c container.Summary, imageRef, digest string) {
+			defer wg.Done()
 
 			var result registry.CheckResult
 			if digest == "" {
@@ -680,7 +742,7 @@ func checkHostUpdates(ctx context.Context, hostName, address, sshKey string) ([]
 				Dir:       c.Labels["com.docker.compose.project.working_dir"],
 				Result:    result,
 			}}
-		}(i, c)
+		}(i, c, imageRef, info.digest)
 	}
 
 	go func() {
@@ -727,14 +789,27 @@ func containerDisplayName(names []string, id string) string {
 func statusText(r registry.CheckResult) string {
 	switch r.Status {
 	case registry.UpdateAvailable:
-		return r.Status.String()
+		return "update available"
 	case registry.UpToDate:
-		return r.Status.String()
+		return "up-to-date"
 	default:
 		if r.Error != nil {
-			return "check failed: " + r.Error.Error()
+			msg := r.Error.Error()
+			switch {
+			case strings.Contains(msg, "TOOMANYREQUESTS"):
+				return "rate limited"
+			case strings.Contains(msg, "no registry digest"):
+				return "local build"
+			case strings.Contains(msg, "inspect container"), strings.Contains(msg, "error during connect"), strings.Contains(msg, "Connection reset"):
+				return "connection error"
+			default:
+				if len(msg) > 40 {
+					msg = msg[:40] + "…"
+				}
+				return "check failed: " + msg
+			}
 		}
-		return r.Status.String()
+		return "check failed"
 	}
 }
 

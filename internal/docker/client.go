@@ -25,7 +25,10 @@ type Client struct {
 //
 // sshKeyPath is optional — when non-empty, it is passed as -i to ssh.
 func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client, error) {
-	var sshFlags []string
+	sshFlags := []string{
+		"-o", "ServerAliveInterval=15",
+		"-o", "ServerAliveCountMax=3",
+	}
 	if sshKeyPath != "" {
 		sshFlags = append(sshFlags, "-i", sshKeyPath)
 	}
@@ -37,7 +40,8 @@ func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client,
 
 	httpClient := &http.Client{
 		Transport: &http.Transport{
-			DialContext: helper.Dialer,
+			DialContext:     helper.Dialer,
+			MaxConnsPerHost: 1, // Force all requests through one SSH pipe — prevents spawning multiple SSH subprocesses
 		},
 	}
 
