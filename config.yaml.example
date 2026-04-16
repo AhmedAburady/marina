@@ -1,15 +1,18 @@
 hosts:
   gmktec:
-    address: ssh://ahmed@10.0.0.50
+    address: 10.0.0.50
   pve-arr:
-    address: ssh://ahmed@10.0.0.51
+    address: 10.0.0.51
   synology:
-    address: ssh://ahmed@synology.tail
+    address: synology.tail
+    user: root
+    ssh_key: ~/.ssh/id_rsa    # per-host key override
     stacks:
-      media: /opt/stacks/media    # manually defined (fallback for stopped stacks)
+      media: /opt/stacks/media
 
 settings:
-  ssh_key: ~/.ssh/id_ed25519
+  username: username
+  ssh_key: ~/.ssh/id_ed25519    # global default SSH key
   prune_after_update: true
 
 notifications:

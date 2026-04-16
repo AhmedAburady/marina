@@ -34,29 +34,59 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 	}
 
 	if len(cfg.Hosts) == 0 {
-		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <ssh-url>")
+		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
 
-	cmd.Printf("%-20s  %s\n", "NAME", "ADDRESS")
-	cmd.Printf("%-20s  %s\n", strings.Repeat("─", 20), strings.Repeat("─", 40))
+	cmd.Printf("%-20s  %-16s  %-16s  %s\n", "NAME", "USER", "ADDRESS", "KEY")
+	cmd.Printf("%-20s  %-16s  %-16s  %s\n", strings.Repeat("─", 20), strings.Repeat("─", 16), strings.Repeat("─", 16), strings.Repeat("─", 20))
 	for name, h := range cfg.Hosts {
-		cmd.Printf("%-20s  %s\n", name, h.Address)
+		var userDisplay string
+		if h.User != "" {
+			userDisplay = h.User
+		} else if cfg.Settings.Username != "" {
+			userDisplay = "(global: " + cfg.Settings.Username + ")"
+		} else {
+			userDisplay = "(none)"
+		}
+		var keyDisplay string
+		if h.SSHKey != "" {
+			keyDisplay = h.SSHKey
+		} else {
+			keyDisplay = "(global)"
+		}
+		cmd.Printf("%-20s  %-16s  %-16s  %s\n", name, userDisplay, h.Address, keyDisplay)
 	}
 	return nil
 }
 
 func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
-	return &cobra.Command{
-		Use:   "add <name> <ssh-url>",
+	var sshKey string
+	cmd := &cobra.Command{
+		Use:   "add <name> <address>",
 		Short: "Add a remote Docker host",
-		Example: `  marina hosts add gmktec ssh://ahmed@10.0.0.50
-  marina hosts add pve-arr ssh://ahmed@10.0.0.51`,
+		Example: `  marina hosts add gmktec 10.0.0.50
+  marina hosts add pve-arr ahmed@10.0.0.51
+  marina hosts add synology root@synology.tail
+  marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			name, address := args[0], args[1]
-			if !strings.HasPrefix(address, "ssh://") {
-				return fmt.Errorf("address must start with ssh:// (got %q)", address)
+			name, raw := args[0], args[1]
+
+			// Strip accidental ssh:// prefix.
+			raw = strings.TrimPrefix(raw, "ssh://")
+
+			// Split on @ to separate optional user from address.
+			var user, address string
+			if idx := strings.Index(raw, "@"); idx >= 0 {
+				user = raw[:idx]
+				address = raw[idx+1:]
+			} else {
+				address = raw
+			}
+
+			if address == "" {
+				return fmt.Errorf("address must not be empty (got %q)", args[1])
 			}
 
 			cfg, err := config.Load(gf.Config)
@@ -68,15 +98,18 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 				return fmt.Errorf("host %q already exists; remove it first with: marina hosts remove %s", name, name)
 			}
 
-			cfg.Hosts[name] = &config.HostConfig{Address: address}
+			cfg.Hosts[name] = &config.HostConfig{Address: address, User: user, SSHKey: sshKey}
 			if err := config.Save(cfg, gf.Config); err != nil {
 				return err
 			}
 
-			cmd.Printf("Added host %q (%s)\n", name, address)
+			hostCfg := cfg.Hosts[name]
+			cmd.Printf("Added host %q (%s)\n", name, hostCfg.SSHAddress(cfg.Settings.Username))
 			return nil
 		},
 	}
+	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host")
+	return cmd
 }
 
 func newHostsRemoveCmd(gf *GlobalFlags) *cobra.Command {
@@ -139,7 +172,7 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 			// SSH connectivity testing is implemented in Phase 3 (internal/ssh).
 			// For now, report the host addresses that would be tested.
 			for name, h := range targets {
-				cmd.Printf("%-20s  %s  [SSH test coming in Phase 3]\n", name, h.Address)
+				cmd.Printf("%-20s  %s  [SSH test coming in Phase 3]\n", name, h.SSHAddress(cfg.Settings.Username))
 			}
 			return nil
 		},

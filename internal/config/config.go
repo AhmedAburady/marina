@@ -20,15 +20,44 @@ type Config struct {
 
 // HostConfig represents a single remote Docker host.
 type HostConfig struct {
-	// Address is an SSH URL, e.g. ssh://user@10.0.0.50
+	// Address is just the IP or hostname, e.g. "10.0.0.50" or "synology.tail"
 	Address string `yaml:"address"`
+	// User is an optional per-host SSH user override. When empty, the global
+	// Settings.Username is used instead.
+	User string `yaml:"user,omitempty"`
+	// SSHKey is an optional per-host SSH key path override. When empty, the
+	// global Settings.SSHKey is used instead.
+	SSHKey string `yaml:"ssh_key,omitempty"`
 	// Stacks maps stack name → compose project directory on the remote host.
 	// Used as a fallback for stacks that are fully stopped (no running containers).
 	Stacks map[string]string `yaml:"stacks,omitempty"`
 }
 
+// ResolvedSSHKey returns the SSH key path for this host, falling back to
+// the global key when no per-host override is set.
+func (h *HostConfig) ResolvedSSHKey(globalKey string) string {
+	if h.SSHKey != "" {
+		return h.SSHKey
+	}
+	return globalKey
+}
+
+// SSHAddress returns the full SSH URL for this host, using the provided
+// fallback username when the host has no per-host User set.
+func (h *HostConfig) SSHAddress(globalUser string) string {
+	user := h.User
+	if user == "" {
+		user = globalUser
+	}
+	if user != "" {
+		return "ssh://" + user + "@" + h.Address
+	}
+	return "ssh://" + h.Address
+}
+
 // Settings holds global marina settings.
 type Settings struct {
+	Username         string `yaml:"username"`
 	SSHKey           string `yaml:"ssh_key"`
 	PruneAfterUpdate bool   `yaml:"prune_after_update"`
 }

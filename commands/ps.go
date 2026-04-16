@@ -46,7 +46,7 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 	}
 
 	if len(targets) == 0 {
-		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <ssh-url>")
+		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
 
@@ -60,7 +60,7 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 			defer wg.Done()
 			containers, err := fetchContainers(cmd.Context(), address)
 			results <- hostContainers{host: name, containers: containers, err: err}
-		}(name, h.Address)
+		}(name, h.SSHAddress(cfg.Settings.Username))
 	}
 
 	// Close the channel once all goroutines are done.

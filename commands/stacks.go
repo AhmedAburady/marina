@@ -44,7 +44,7 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 	}
 
 	if len(targets) == 0 {
-		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <ssh-url>")
+		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
 
@@ -63,7 +63,7 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 			}
 			stacks := discovery.GroupByStack(name, containers, hostCfg.Stacks)
 			results <- hostStacks{host: name, stacks: stacks}
-		}(name, h.Address, h)
+		}(name, h.SSHAddress(cfg.Settings.Username), h)
 	}
 
 	go func() {
