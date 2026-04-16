@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -20,7 +21,8 @@ var (
 	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 	cellStyle    = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
 	borderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	stoppedStyle = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("183")) // muted mauve/pink
+	stoppedStyle  = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("183")) // muted mauve/pink
+	degradedStyle = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("214")) // amber/orange — needs attention
 )
 
 // termWidth returns the current terminal width, falling back to 80 if it
@@ -56,15 +58,30 @@ func hostHeader(host string) string {
 	return style.Render("▸ " + host)
 }
 
-// PrintContainerTable writes a host header followed by a styled table of containers.
+// PrintContainerTable writes a host header followed by a styled table of containers
+// sorted by stack name for visual grouping.
 func PrintContainerTable(w io.Writer, host string, containers []container.Summary) {
+	// Sort containers by stack name, then by container name within each stack.
+	sort.Slice(containers, func(i, j int) bool {
+		si := containers[i].Labels["com.docker.compose.project"]
+		sj := containers[j].Labels["com.docker.compose.project"]
+		if si != sj {
+			return si < sj
+		}
+		return containerName(containers[i]) < containerName(containers[j])
+	})
+
 	fmt.Fprintln(w, hostHeader(host))
-	t := StyledTable("NAME", "IMAGE", "STATUS", "PORTS")
+	t := StyledTable("STACK", "CONTAINER", "IMAGE", "STATUS", "PORTS")
 
 	for _, c := range containers {
+		stack := c.Labels["com.docker.compose.project"]
+		if stack == "" {
+			stack = "-"
+		}
 		name := containerName(c)
 		ports := formatPorts(c.Ports)
-		t.Row(name, c.Image, c.Status, ports)
+		t.Row(stack, name, c.Image, c.Status, ports)
 	}
 
 	fmt.Fprintln(w, t.String())
@@ -98,8 +115,14 @@ func PrintStackTable(w io.Writer, stacks []discovery.Stack) {
 					return headerStyle.PaddingLeft(1).PaddingRight(1)
 				}
 				// row is 0-indexed for data rows
-				if row >= 0 && row < len(hostStacks) && hostStacks[row].Total == 0 {
-					return stoppedStyle
+				if row >= 0 && row < len(hostStacks) {
+					s := hostStacks[row]
+					if s.Running == 0 {
+						return stoppedStyle
+					}
+					if s.Running < s.Total {
+						return degradedStyle
+					}
 				}
 				return cellStyle
 			}).
@@ -114,7 +137,7 @@ func PrintStackTable(w io.Writer, stacks []discovery.Stack) {
 // stackStatus returns a human-readable status string for a stack.
 // Examples: "8/8 running", "7/8 running", "stopped"
 func stackStatus(s discovery.Stack) string {
-	if s.Total == 0 {
+	if s.Running == 0 {
 		return "stopped"
 	}
 	if s.Running == s.Total {
@@ -135,13 +158,18 @@ func containerName(c container.Summary) string {
 // formatPorts formats the exposed port mappings as "hostPort->containerPort/proto".
 // At most 2 ports are shown to keep the table readable.
 func formatPorts(ports []container.Port) string {
+	seen := make(map[string]bool)
 	var parts []string
 	for _, p := range ports {
 		if p.PublicPort == 0 {
-			// Port is not bound to the host — skip.
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%d->%d/%s", p.PublicPort, p.PrivatePort, p.Type))
+		entry := fmt.Sprintf("%d->%d/%s", p.PublicPort, p.PrivatePort, p.Type)
+		if seen[entry] {
+			continue
+		}
+		seen[entry] = true
+		parts = append(parts, entry)
 		if len(parts) == 2 {
 			break
 		}
@@ -157,13 +185,26 @@ func newPlainWriter(w io.Writer) *tabwriter.Writer {
 
 // PrintContainerTablePlain writes a host header and aligned columns.
 func PrintContainerTablePlain(w io.Writer, host string, containers []container.Summary) {
+	sort.Slice(containers, func(i, j int) bool {
+		si := containers[i].Labels["com.docker.compose.project"]
+		sj := containers[j].Labels["com.docker.compose.project"]
+		if si != sj {
+			return si < sj
+		}
+		return containerName(containers[i]) < containerName(containers[j])
+	})
+
 	fmt.Fprintf(w, "[%s]\n", host)
 	tw := newPlainWriter(w)
-	fmt.Fprintln(tw, "NAME\tIMAGE\tSTATUS\tPORTS")
+	fmt.Fprintln(tw, "STACK\tCONTAINER\tIMAGE\tSTATUS\tPORTS")
 	for _, c := range containers {
+		stack := c.Labels["com.docker.compose.project"]
+		if stack == "" {
+			stack = "-"
+		}
 		name := containerName(c)
 		ports := formatPorts(c.Ports)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, c.Image, c.Status, ports)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", stack, name, c.Image, c.Status, ports)
 	}
 	tw.Flush()
 	fmt.Fprintln(w)

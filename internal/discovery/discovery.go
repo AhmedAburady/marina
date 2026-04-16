@@ -81,8 +81,8 @@ func GroupByStack(host string, containers []container.Summary, configStacks map[
 
 	// Sort: running stacks first (by name), stopped stacks last (by name).
 	sort.Slice(stacks, func(i, j int) bool {
-		iStopped := stacks[i].Total == 0
-		jStopped := stacks[j].Total == 0
+		iStopped := stacks[i].Running == 0
+		jStopped := stacks[j].Running == 0
 		if iStopped != jStopped {
 			return !iStopped // running before stopped
 		}

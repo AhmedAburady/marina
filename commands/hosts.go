@@ -3,8 +3,12 @@ package commands
 import (
 	"fmt"
 	"strings"
+	"sync"
+	"text/tabwriter"
+	"time"
 
 	"github.com/AhmedAburady/marina/internal/config"
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -194,11 +198,68 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				return nil
 			}
 
-			// SSH connectivity testing is implemented in Phase 3 (internal/ssh).
-			// For now, report the host addresses that would be tested.
-			for name, h := range targets {
-				cmd.Printf("%-20s  %s  [SSH test coming in Phase 3]\n", name, h.SSHAddress(cfg.Settings.Username))
+			type testResult struct {
+				host    string
+				ok      bool
+				latency time.Duration
+				err     error
 			}
+
+			results := make(chan testResult, len(targets))
+			var wg sync.WaitGroup
+
+			for name, h := range targets {
+				wg.Add(1)
+				go func(name, address, sshKey string) {
+					defer wg.Done()
+					sshCfg := internalssh.Config{
+						Address: address,
+						KeyPath: sshKey,
+					}
+					start := time.Now()
+					_, err := internalssh.Exec(cmd.Context(), sshCfg, "echo ok")
+					latency := time.Since(start)
+					if err != nil {
+						results <- testResult{host: name, ok: false, err: err}
+					} else {
+						results <- testResult{host: name, ok: true, latency: latency}
+					}
+				}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
+			}
+
+			go func() {
+				wg.Wait()
+				close(results)
+			}()
+
+			var collected []testResult
+			for r := range results {
+				collected = append(collected, r)
+			}
+
+			if gf.Plain {
+				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 3, ' ', 0)
+				fmt.Fprintln(tw, "HOST\tSTATUS\tLATENCY")
+				for _, r := range collected {
+					if r.ok {
+						fmt.Fprintf(tw, "%s\tok\t%s\n", r.host, r.latency.Round(time.Millisecond).String())
+					} else {
+						fmt.Fprintf(tw, "%s\t%s\t-\n", r.host, r.err.Error())
+					}
+				}
+				tw.Flush()
+				return nil
+			}
+
+			t := ui.StyledTable("HOST", "STATUS", "LATENCY")
+			for _, r := range collected {
+				if r.ok {
+					t.Row(r.host, "ok", r.latency.Round(time.Millisecond).String())
+				} else {
+					t.Row(r.host, r.err.Error(), "-")
+				}
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), t.String())
 			return nil
 		},
 	}

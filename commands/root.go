@@ -42,6 +42,11 @@ Zero setup required on target hosts — marina connects via native SSH.`,
 		newVersionCmd(version),
 		newPsCmd(&gf),
 		newStacksCmd(&gf),
+		newRestartCmd(&gf),
+		newStopCmd(&gf),
+		newStartCmd(&gf),
+		newPullCmd(&gf),
+		newLogsCmd(&gf),
 	)
 
 	return root
