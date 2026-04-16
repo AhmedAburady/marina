@@ -96,9 +96,9 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 
 			// Split on @ to separate optional user from address.
 			var user, address string
-			if idx := strings.Index(raw, "@"); idx >= 0 {
-				user = raw[:idx]
-				address = raw[idx+1:]
+			if before, after, ok := strings.Cut(raw, "@"); ok {
+				user = before
+				address = after
 			} else {
 				address = raw
 			}

@@ -8,7 +8,9 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/discovery"
+	"github.com/AhmedAburady/marina/internal/state"
 	"github.com/AhmedAburady/marina/internal/ui"
+	"github.com/docker/docker/api/types/container"
 	"github.com/spf13/cobra"
 )
 
@@ -123,9 +125,10 @@ func newStacksRemoveCmd(gf *GlobalFlags) *cobra.Command {
 }
 
 type hostStacks struct {
-	stacks []discovery.Stack
-	err    error
-	host   string
+	stacks     []discovery.Stack
+	containers []container.Summary
+	err        error
+	host       string
 }
 
 func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
@@ -176,7 +179,7 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 				return
 			}
 			stacks := discovery.GroupByStack(name, containers, hostCfg.Stacks)
-			results <- hostStacks{host: name, stacks: stacks}
+			results <- hostStacks{host: name, stacks: stacks, containers: containers}
 		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey), h)
 	}
 
@@ -189,9 +192,26 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 	var allStacks []discovery.Stack
 	for r := range results {
 		if r.err != nil {
+			// Attempt to load last-known state from cache.
+			store, loadErr := state.Load("")
+			if loadErr == nil {
+				if snap, ok := store.Hosts[r.host]; ok {
+					indicator := cachedIndicator(snap.UpdatedAt)
+					containers := convertFromStateContainers(snap.Containers)
+					hostCfg := targets[r.host]
+					stacks := discovery.GroupByStack(r.host+indicator, containers, hostCfg.Stacks)
+					allStacks = append(allStacks, stacks...)
+					continue
+				}
+			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", r.host, r.err)
 			continue
 		}
+		// Save live data to state cache (best-effort).
+		snapshot := &state.HostSnapshot{
+			Containers: convertToStateContainers(r.containers),
+		}
+		_ = state.SaveHostSnapshot(r.host, snapshot, "")
 		allStacks = append(allStacks, r.stacks...)
 	}
 

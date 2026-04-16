@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/docker/cli/cli/connhelper"
 	"github.com/docker/docker/api/types/container"
@@ -59,6 +60,38 @@ func (c *Client) ListContainers(ctx context.Context) ([]container.Summary, error
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
 	return containers, nil
+}
+
+// InspectContainer returns the image reference and local digest for a container.
+// The digest comes from the image's RepoDigests (set when pulled from a registry).
+func (c *Client) InspectContainer(ctx context.Context, containerID string) (imageRef string, digest string, err error) {
+	// Inspect the container to get its ImageID
+	ctr, err := c.inner.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return "", "", fmt.Errorf("inspect container %s: %w", containerID, err)
+	}
+
+	imageRef = ctr.Config.Image
+
+	// Inspect the image to get RepoDigests
+	img, _, err := c.inner.ImageInspectWithRaw(ctx, ctr.Image)
+	if err != nil {
+		return imageRef, "", fmt.Errorf("inspect image for %s: %w", containerID, err)
+	}
+
+	// RepoDigests looks like ["nginx@sha256:abc123...", "ghcr.io/user/repo@sha256:def456..."]
+	// Return the first one that matches the image reference, or just the first one.
+	for _, rd := range img.RepoDigests {
+		if strings.HasPrefix(rd, strings.Split(imageRef, ":")[0]) {
+			return imageRef, rd, nil
+		}
+	}
+	if len(img.RepoDigests) > 0 {
+		return imageRef, img.RepoDigests[0], nil
+	}
+
+	// No repo digest available (locally built image)
+	return imageRef, "", nil
 }
 
 // Close releases the underlying HTTP transport.
