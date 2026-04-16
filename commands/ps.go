@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/AhmedAburady/marina/internal/config"
@@ -35,7 +36,12 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 		return err
 	}
 
-	// Build the target host map: all hosts or just the one specified by -H.
+	if len(cfg.Hosts) == 0 {
+		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
+		return nil
+	}
+
+	// Determine target host map: -H flag, --all flag, or interactive selector.
 	targets := cfg.Hosts
 	if gf.Host != "" {
 		h, ok := cfg.Hosts[gf.Host]
@@ -43,11 +49,19 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 			return fmt.Errorf("host %q not found in config", gf.Host)
 		}
 		targets = map[string]*config.HostConfig{gf.Host: h}
-	}
-
-	if len(targets) == 0 {
-		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
-		return nil
+	} else if !gf.All {
+		hostNames := make([]string, 0, len(cfg.Hosts))
+		for name := range cfg.Hosts {
+			hostNames = append(hostNames, name)
+		}
+		sort.Strings(hostNames)
+		selected, err := ui.SelectHost(hostNames)
+		if err != nil {
+			return err
+		}
+		if selected != "" {
+			targets = map[string]*config.HostConfig{selected: cfg.Hosts[selected]}
+		}
 	}
 
 	// Fan out to all target hosts in parallel.

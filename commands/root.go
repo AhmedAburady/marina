@@ -12,6 +12,7 @@ type GlobalFlags struct {
 	Container string
 	Config    string
 	Plain     bool
+	All       bool
 }
 
 // NewRootCmd builds the root cobra command and registers all subcommands.
@@ -33,6 +34,7 @@ Zero setup required on target hosts — marina connects via native SSH.`,
 	root.PersistentFlags().StringVarP(&gf.Container, "container", "c", "", "Target container name or ID")
 	root.PersistentFlags().StringVar(&gf.Config, "config", "", "Config file path (default ~/.config/marina/config.yaml)")
 	root.PersistentFlags().BoolVar(&gf.Plain, "plain", false, "Plain text output (no borders or styling)")
+	root.PersistentFlags().BoolVar(&gf.All, "all", false, "Target all hosts (skip host selector)")
 
 	root.AddCommand(
 		newHostsCmd(&gf),

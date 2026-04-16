@@ -52,9 +52,9 @@ func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client,
 	return &Client{inner: inner}, nil
 }
 
-// ListContainers returns all running containers on the remote host.
+// ListContainers returns all containers on the remote host (including stopped).
 func (c *Client) ListContainers(ctx context.Context) ([]container.Summary, error) {
-	containers, err := c.inner.ContainerList(ctx, container.ListOptions{})
+	containers, err := c.inner.ContainerList(ctx, container.ListOptions{All: true})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}

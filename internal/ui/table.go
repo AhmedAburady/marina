@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
-	cellStyle   = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
-	borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	headerStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
+	cellStyle    = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1)
+	borderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	stoppedStyle = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("183")) // muted mauve/pink
 )
 
 // termWidth returns the current terminal width, falling back to 80 if it
@@ -49,32 +50,77 @@ func StyledTable(headers ...string) *table.Table {
 		Headers(headers...)
 }
 
-// PrintContainerTable writes a styled table of containers to w.
-// Columns: HOST | NAME | IMAGE | STATUS | PORTS
+// hostHeader returns a styled host name header line.
+func hostHeader(host string) string {
+	style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
+	return style.Render("▸ " + host)
+}
+
+// PrintContainerTable writes a host header followed by a styled table of containers.
 func PrintContainerTable(w io.Writer, host string, containers []container.Summary) {
-	t := StyledTable("HOST", "NAME", "IMAGE", "STATUS", "PORTS")
+	fmt.Fprintln(w, hostHeader(host))
+	t := StyledTable("NAME", "IMAGE", "STATUS", "PORTS")
 
 	for _, c := range containers {
 		name := containerName(c)
 		ports := formatPorts(c.Ports)
-		t.Row(host, name, c.Image, c.Status, ports)
+		t.Row(name, c.Image, c.Status, ports)
 	}
 
-	fmt.Fprint(w, t.String())
-	fmt.Fprintln(w)
+	fmt.Fprintln(w, t.String())
 }
 
-// PrintStackTable writes a styled table of compose stacks to w.
-// Columns: HOST | STACK | DIR | CONTAINERS
+// PrintStackTable writes stacks grouped by host, each with its own header and table.
 func PrintStackTable(w io.Writer, stacks []discovery.Stack) {
-	t := StyledTable("HOST", "STACK", "DIR", "CONTAINERS")
-
+	// Group stacks by host, preserving insertion order.
+	var hostOrder []string
+	grouped := make(map[string][]discovery.Stack)
 	for _, s := range stacks {
-		t.Row(s.Host, s.Name, s.Dir, strconv.Itoa(len(s.Containers)))
+		if _, seen := grouped[s.Host]; !seen {
+			hostOrder = append(hostOrder, s.Host)
+		}
+		grouped[s.Host] = append(grouped[s.Host], s)
 	}
 
-	fmt.Fprint(w, t.String())
-	fmt.Fprintln(w)
+	for i, host := range hostOrder {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintln(w, hostHeader(host))
+		hostStacks := grouped[host]
+		t := table.New().
+			Border(lipgloss.RoundedBorder()).
+			BorderStyle(borderStyle).
+			BorderHeader(true).
+			Width(termWidth()).
+			StyleFunc(func(row, col int) lipgloss.Style {
+				if row == table.HeaderRow {
+					return headerStyle.PaddingLeft(1).PaddingRight(1)
+				}
+				// row is 0-indexed for data rows
+				if row >= 0 && row < len(hostStacks) && hostStacks[row].Total == 0 {
+					return stoppedStyle
+				}
+				return cellStyle
+			}).
+			Headers("STACK", "DIR", "STATUS")
+		for _, s := range hostStacks {
+			t.Row(s.Name, s.Dir, stackStatus(s))
+		}
+		fmt.Fprintln(w, t.String())
+	}
+}
+
+// stackStatus returns a human-readable status string for a stack.
+// Examples: "8/8 running", "7/8 running", "stopped"
+func stackStatus(s discovery.Stack) string {
+	if s.Total == 0 {
+		return "stopped"
+	}
+	if s.Running == s.Total {
+		return strconv.Itoa(s.Running) + " running"
+	}
+	return strconv.Itoa(s.Running) + "/" + strconv.Itoa(s.Total) + " running"
 }
 
 // containerName returns the primary name of a container with the leading
@@ -109,26 +155,43 @@ func newPlainWriter(w io.Writer) *tabwriter.Writer {
 	return tabwriter.NewWriter(w, 0, 4, 3, ' ', 0)
 }
 
-// PrintContainerTablePlain writes containers as aligned columns with a header.
+// PrintContainerTablePlain writes a host header and aligned columns.
 func PrintContainerTablePlain(w io.Writer, host string, containers []container.Summary) {
+	fmt.Fprintf(w, "[%s]\n", host)
 	tw := newPlainWriter(w)
-	fmt.Fprintln(tw, "HOST\tNAME\tIMAGE\tSTATUS\tPORTS")
+	fmt.Fprintln(tw, "NAME\tIMAGE\tSTATUS\tPORTS")
 	for _, c := range containers {
 		name := containerName(c)
 		ports := formatPorts(c.Ports)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", host, name, c.Image, c.Status, ports)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", name, c.Image, c.Status, ports)
 	}
 	tw.Flush()
+	fmt.Fprintln(w)
 }
 
-// PrintStackTablePlain writes stacks as aligned columns with a header.
+// PrintStackTablePlain writes stacks grouped by host with aligned columns.
 func PrintStackTablePlain(w io.Writer, stacks []discovery.Stack) {
-	tw := newPlainWriter(w)
-	fmt.Fprintln(tw, "HOST\tSTACK\tDIR\tCONTAINERS")
+	var hostOrder []string
+	grouped := make(map[string][]discovery.Stack)
 	for _, s := range stacks {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\n", s.Host, s.Name, s.Dir, len(s.Containers))
+		if _, seen := grouped[s.Host]; !seen {
+			hostOrder = append(hostOrder, s.Host)
+		}
+		grouped[s.Host] = append(grouped[s.Host], s)
 	}
-	tw.Flush()
+
+	for i, host := range hostOrder {
+		if i > 0 {
+			fmt.Fprintln(w)
+		}
+		fmt.Fprintf(w, "[%s]\n", host)
+		tw := newPlainWriter(w)
+		fmt.Fprintln(tw, "STACK\tDIR\tSTATUS")
+		for _, s := range grouped[host] {
+			fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Name, s.Dir, stackStatus(s))
+		}
+		tw.Flush()
+	}
 }
 
 // PrintHostTablePlain writes hosts as aligned columns with a header.
