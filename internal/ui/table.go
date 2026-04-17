@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 
 	"charm.land/lipgloss/v2"
 	"charm.land/lipgloss/v2/table"
@@ -23,7 +22,28 @@ var (
 	borderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	stoppedStyle  = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("183")) // muted mauve/pink
 	degradedStyle = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("214")) // amber/orange — needs attention
+
+	// Container-state row tints — mirror the TUI containers screen so the CLI
+	// and dashboard show the same colour for the same state.
+	containerExitedStyle     = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("9"))  // bright red — exited / dead
+	containerRestartingStyle = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("11")) // bright yellow — restarting
+	containerDimStyle        = lipgloss.NewStyle().PaddingLeft(1).PaddingRight(1).Foreground(lipgloss.Color("8"))  // dim grey — paused / created
 )
+
+// containerStateStyle returns the lipgloss style for a container row based
+// on its docker `State` field. Running returns nil so the default cell
+// style applies (no colour override). Matches tui.containerStateColor.
+func containerStateStyle(state string) *lipgloss.Style {
+	switch state {
+	case "exited", "dead":
+		return &containerExitedStyle
+	case "restarting":
+		return &containerRestartingStyle
+	case "paused", "created":
+		return &containerDimStyle
+	}
+	return nil
+}
 
 // termWidth returns the current terminal width, falling back to 80 if it
 // cannot be determined (e.g. when stdout is not a TTY).
@@ -59,7 +79,9 @@ func hostHeader(host string) string {
 }
 
 // PrintContainerTable writes a host header followed by a styled table of containers
-// sorted by stack name for visual grouping.
+// sorted by stack name for visual grouping. Rows are tinted by docker state:
+// exited/dead → red, restarting → yellow, paused/created → dim, running →
+// default. Same palette the TUI containers screen uses.
 func PrintContainerTable(w io.Writer, host string, containers []container.Summary) {
 	// Sort containers by stack name, then by container name within each stack.
 	sort.Slice(containers, func(i, j int) bool {
@@ -68,19 +90,38 @@ func PrintContainerTable(w io.Writer, host string, containers []container.Summar
 		if si != sj {
 			return si < sj
 		}
-		return containerName(containers[i]) < containerName(containers[j])
+		return ContainerName(containers[i]) < ContainerName(containers[j])
 	})
 
 	fmt.Fprintln(w, hostHeader(host))
-	t := StyledTable("STACK", "CONTAINER", "IMAGE", "STATUS", "PORTS")
+	// Closure-capture the sorted slice so StyleFunc can look up the state
+	// for each rendered data row by index (row 0..len-1).
+	sorted := containers
+	t := table.New().
+		Border(lipgloss.RoundedBorder()).
+		BorderStyle(borderStyle).
+		BorderHeader(true).
+		Width(termWidth()).
+		StyleFunc(func(row, col int) lipgloss.Style {
+			if row == table.HeaderRow {
+				return headerStyle.PaddingLeft(1).PaddingRight(1)
+			}
+			if row >= 0 && row < len(sorted) {
+				if st := containerStateStyle(sorted[row].State); st != nil {
+					return *st
+				}
+			}
+			return cellStyle
+		}).
+		Headers("STACK", "CONTAINER", "IMAGE", "STATUS", "PORTS")
 
-	for _, c := range containers {
+	for _, c := range sorted {
 		stack := c.Labels["com.docker.compose.project"]
 		if stack == "" {
 			stack = "-"
 		}
-		name := containerName(c)
-		ports := formatPorts(c.Ports)
+		name := ContainerName(c)
+		ports := FormatPorts(c.Ports)
 		t.Row(stack, name, c.Image, c.Status, ports)
 	}
 
@@ -128,15 +169,15 @@ func PrintStackTable(w io.Writer, stacks []discovery.Stack) {
 			}).
 			Headers("STACK", "DIR", "STATUS")
 		for _, s := range hostStacks {
-			t.Row(s.Name, s.Dir, stackStatus(s))
+			t.Row(s.Name, s.Dir, StackStatus(s))
 		}
 		fmt.Fprintln(w, t.String())
 	}
 }
 
-// stackStatus returns a human-readable status string for a stack.
+// StackStatus returns a human-readable status string for a stack.
 // Examples: "8/8 running", "7/8 running", "stopped"
-func stackStatus(s discovery.Stack) string {
+func StackStatus(s discovery.Stack) string {
 	if s.Running == 0 {
 		return "stopped"
 	}
@@ -146,18 +187,18 @@ func stackStatus(s discovery.Stack) string {
 	return strconv.Itoa(s.Running) + "/" + strconv.Itoa(s.Total) + " running"
 }
 
-// containerName returns the primary name of a container with the leading
+// ContainerName returns the primary name of a container with the leading
 // slash stripped (Docker always prefixes container names with "/").
-func containerName(c container.Summary) string {
+func ContainerName(c container.Summary) string {
 	if len(c.Names) == 0 {
 		return c.ID[:12]
 	}
 	return strings.TrimPrefix(c.Names[0], "/")
 }
 
-// formatPorts formats the exposed port mappings as "hostPort->containerPort/proto".
+// FormatPorts formats the exposed port mappings as "hostPort->containerPort/proto".
 // At most 2 ports are shown to keep the table readable.
-func formatPorts(ports []container.Port) string {
+func FormatPorts(ports []container.Port) string {
 	seen := make(map[string]bool)
 	var parts []string
 	for _, p := range ports {
@@ -177,70 +218,3 @@ func formatPorts(ports []container.Port) string {
 	return strings.Join(parts, ", ")
 }
 
-// newPlainWriter returns a tabwriter that aligns columns with consistent padding.
-func newPlainWriter(w io.Writer) *tabwriter.Writer {
-	// minwidth=0, tabwidth=4, padding=3, padchar=' '
-	return tabwriter.NewWriter(w, 0, 4, 3, ' ', 0)
-}
-
-// PrintContainerTablePlain writes a host header and aligned columns.
-func PrintContainerTablePlain(w io.Writer, host string, containers []container.Summary) {
-	sort.Slice(containers, func(i, j int) bool {
-		si := containers[i].Labels["com.docker.compose.project"]
-		sj := containers[j].Labels["com.docker.compose.project"]
-		if si != sj {
-			return si < sj
-		}
-		return containerName(containers[i]) < containerName(containers[j])
-	})
-
-	fmt.Fprintf(w, "[%s]\n", host)
-	tw := newPlainWriter(w)
-	fmt.Fprintln(tw, "STACK\tCONTAINER\tIMAGE\tSTATUS\tPORTS")
-	for _, c := range containers {
-		stack := c.Labels["com.docker.compose.project"]
-		if stack == "" {
-			stack = "-"
-		}
-		name := containerName(c)
-		ports := formatPorts(c.Ports)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", stack, name, c.Image, c.Status, ports)
-	}
-	tw.Flush()
-	fmt.Fprintln(w)
-}
-
-// PrintStackTablePlain writes stacks grouped by host with aligned columns.
-func PrintStackTablePlain(w io.Writer, stacks []discovery.Stack) {
-	var hostOrder []string
-	grouped := make(map[string][]discovery.Stack)
-	for _, s := range stacks {
-		if _, seen := grouped[s.Host]; !seen {
-			hostOrder = append(hostOrder, s.Host)
-		}
-		grouped[s.Host] = append(grouped[s.Host], s)
-	}
-
-	for i, host := range hostOrder {
-		if i > 0 {
-			fmt.Fprintln(w)
-		}
-		fmt.Fprintf(w, "[%s]\n", host)
-		tw := newPlainWriter(w)
-		fmt.Fprintln(tw, "STACK\tDIR\tSTATUS")
-		for _, s := range grouped[host] {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", s.Name, s.Dir, stackStatus(s))
-		}
-		tw.Flush()
-	}
-}
-
-// PrintHostTablePlain writes hosts as aligned columns with a header.
-func PrintHostTablePlain(w io.Writer, rows [][]string) {
-	tw := newPlainWriter(w)
-	fmt.Fprintln(tw, "NAME\tUSER\tADDRESS\tKEY")
-	for _, row := range rows {
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
-	}
-	tw.Flush()
-}

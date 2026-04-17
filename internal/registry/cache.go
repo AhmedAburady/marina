@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,6 +100,21 @@ func (c *Cache) Lookup(imageRef, digest string) (UpdateStatus, bool) {
 		return 0, false
 	}
 	return entry.Status, true
+}
+
+// InvalidateRef removes every cached entry for `imageRef` regardless of the
+// digest part of the key. Call this after an apply so the next check issues
+// a fresh HEAD request — without it, post-apply rechecks can keep returning
+// the stale pre-apply status keyed on the container's prior digest.
+func (c *Cache) InvalidateRef(imageRef string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prefix := imageRef + "|"
+	for k := range c.Entries {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.Entries, k)
+		}
+	}
 }
 
 // Store saves a check result. Thread-safe.

@@ -66,36 +66,58 @@ func (c *Client) ListContainers(ctx context.Context) ([]container.Summary, error
 	return containers, nil
 }
 
-// InspectContainer returns the image reference and local digest for a container.
-// The digest comes from the image's RepoDigests (set when pulled from a registry).
-func (c *Client) InspectContainer(ctx context.Context, containerID string) (imageRef string, digest string, err error) {
-	// Inspect the container to get its ImageID
+// ImageMeta captures what the registry check needs about a container's
+// image. Digests is the full RepoDigests list filtered to the declared
+// reference's repository — a list rather than a single string because
+// Docker accumulates every registry digest that has ever pointed at the
+// image's physical layers. For example, after `docker pull postgres:14`
+// has run across two manifest-list revisions (identical amd64 bytes, but
+// the list digest moved because the arm64 manifest changed), the image
+// carries BOTH list digests. The registry check must match against any
+// of them, not just the first — otherwise it reports "update available"
+// forever because the first element is the stalest.
+type ImageMeta struct {
+	Ref          string   // image reference as declared (e.g. "postgres:14")
+	Digests      []string // all matching RepoDigests, newest last
+	Architecture string   // from image config, e.g. "amd64", "arm64"
+	OS           string   // from image config, e.g. "linux"
+}
+
+// InspectContainer returns the image reference, every local digest that
+// has ever been recorded for the underlying image, and the image's
+// platform coordinates.
+func (c *Client) InspectContainer(ctx context.Context, containerID string) (ImageMeta, error) {
 	ctr, err := c.inner.ContainerInspect(ctx, containerID)
 	if err != nil {
-		return "", "", fmt.Errorf("inspect container %s: %w", containerID, err)
+		return ImageMeta{}, fmt.Errorf("inspect container %s: %w", containerID, err)
 	}
 
-	imageRef = ctr.Config.Image
+	meta := ImageMeta{Ref: ctr.Config.Image}
 
-	// Inspect the image to get RepoDigests
 	img, _, err := c.inner.ImageInspectWithRaw(ctx, ctr.Image)
 	if err != nil {
-		return imageRef, "", fmt.Errorf("inspect image for %s: %w", containerID, err)
+		return meta, fmt.Errorf("inspect image for %s: %w", containerID, err)
 	}
+	meta.Architecture = img.Architecture
+	meta.OS = img.Os
 
-	// RepoDigests looks like ["nginx@sha256:abc123...", "ghcr.io/user/repo@sha256:def456..."]
-	// Return the first one that matches the image reference, or just the first one.
+	// RepoDigests looks like ["nginx@sha256:abc…", "ghcr.io/user/repo@sha256:def…"].
+	// Keep every entry whose repository prefix matches the declared ref so
+	// the caller can compare against any of them (old pulls + new pulls).
+	repoPrefix := strings.Split(meta.Ref, ":")[0] + "@"
 	for _, rd := range img.RepoDigests {
-		if strings.HasPrefix(rd, strings.Split(imageRef, ":")[0]) {
-			return imageRef, rd, nil
+		if strings.HasPrefix(rd, repoPrefix) {
+			meta.Digests = append(meta.Digests, rd)
 		}
 	}
-	if len(img.RepoDigests) > 0 {
-		return imageRef, img.RepoDigests[0], nil
+	if len(meta.Digests) == 0 && len(img.RepoDigests) > 0 {
+		// No prefix match (e.g. tag uses short name but digests use fully
+		// qualified). Fall back to the full list rather than lose the info.
+		meta.Digests = append(meta.Digests, img.RepoDigests...)
 	}
-
-	// No repo digest available (locally built image)
-	return imageRef, "", nil
+	// Locally-built images leave Digests empty — the registry check treats
+	// those as "no digest" and short-circuits.
+	return meta, nil
 }
 
 // Close releases the underlying HTTP transport.

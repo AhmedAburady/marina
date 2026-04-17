@@ -6,8 +6,8 @@ import (
 	"io"
 
 	"charm.land/huh/v2/spinner"
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
-	"github.com/AhmedAburady/marina/internal/docker"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 )
 
@@ -47,36 +47,14 @@ func resolveHost(gf *GlobalFlags) (*hostContext, error) {
 	}, nil
 }
 
-// findStackDir resolves the compose project working directory for the named stack.
-// It checks config-defined stacks first, then falls back to container label discovery.
+// findStackDir resolves the compose working directory for a stack on the
+// host described by hc. This is a thin wrapper around actions.FindStackDir
+// that adapts the hostContext-flavoured CLI surface to the cfg+host shared
+// implementation. The underlying docker.NewClient call still inherits
+// MaxConnsPerHost: 1 from internal/docker, so concurrent fallbacks serialize
+// through a single SSH pipe per host.
 func findStackDir(ctx context.Context, hc *hostContext, stackName string) (string, error) {
-	if dir, ok := hc.host.Stacks[stackName]; ok {
-		return dir, nil
-	}
-
-	dc, err := docker.NewClient(ctx, hc.sshCfg.Address, hc.sshCfg.KeyPath)
-	if err != nil {
-		return "", fmt.Errorf("connect to discover stack dir: %w", err)
-	}
-	defer dc.Close()
-
-	containers, err := dc.ListContainers(ctx)
-	if err != nil {
-		return "", fmt.Errorf("list containers to discover stack dir: %w", err)
-	}
-
-	for _, c := range containers {
-		if c.Labels["com.docker.compose.project"] == stackName {
-			if dir := c.Labels["com.docker.compose.project.working_dir"]; dir != "" {
-				return dir, nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf(
-		"stack %q not found on host %q; register it with: marina stacks add %s <dir> -H %s",
-		stackName, hc.name, stackName, hc.name,
-	)
+	return actions.FindStackDir(ctx, hc.cfg, hc.name, stackName)
 }
 
 // execWithSpinner runs an SSH command with a spinner, then prints the output.

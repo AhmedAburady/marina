@@ -17,6 +17,11 @@ const (
 	UpToDate        UpdateStatus = iota
 	UpdateAvailable
 	CheckFailed
+	// Pinned signals an intentionally-versioned image reference
+	// (e.g. `postgres:14`, `app:v1.2.3`, `image@sha256:…`). The user
+	// chose that version on purpose, so we skip the registry probe
+	// entirely and treat it the same as up-to-date for filtering.
+	Pinned
 )
 
 func (s UpdateStatus) String() string {
@@ -25,6 +30,8 @@ func (s UpdateStatus) String() string {
 		return "up-to-date"
 	case UpdateAvailable:
 		return "update available"
+	case Pinned:
+		return "pinned"
 	default:
 		return "check failed"
 	}
@@ -39,16 +46,23 @@ type CheckResult struct {
 	Error        error  // non-nil if check failed
 }
 
-// CheckUpdate compares a local image digest against the remote registry.
-// imageRef is the image reference (e.g. "nginx:latest", "ghcr.io/user/repo:tag").
-// localDigest is the RepoDigest from Docker inspect (e.g. "sha256:abc123...").
+// CheckUpdate compares a list of known local digests against the remote
+// registry's current digest for a tag. Uses a HEAD request — this returns
+// the registry's Docker-Content-Digest header, which for a multi-arch tag
+// is the manifest list (index) digest. That's what Docker records in
+// RepoDigests when you pull a tag.
 //
-// Returns UpdateAvailable if remote digest differs from local, UpToDate if same,
-// or CheckFailed if the registry couldn't be reached.
-func CheckUpdate(ctx context.Context, imageRef string, localDigest string) CheckResult {
-	result := CheckResult{Image: imageRef, LocalDigest: localDigest}
+// localDigests is a list because Docker accumulates every registry digest
+// that has ever pointed at the same physical image. After successive pulls
+// across manifest-list revisions the image may carry two or three digests;
+// treating any of them as "current" prevents perpetual false positives
+// when the list moves but the underlying platform-specific bytes don't.
+func CheckUpdate(ctx context.Context, imageRef string, localDigests []string) CheckResult {
+	result := CheckResult{Image: imageRef}
+	if len(localDigests) > 0 {
+		result.LocalDigest = localDigests[len(localDigests)-1] // newest for logging
+	}
 
-	// Parse the image reference.
 	ref, err := name.ParseReference(imageRef)
 	if err != nil {
 		result.Status = CheckFailed
@@ -56,37 +70,40 @@ func CheckUpdate(ctx context.Context, imageRef string, localDigest string) Check
 		return result
 	}
 
-	// HEAD request — gets the digest without counting as a pull on Docker Hub.
-	desc, err := remote.Head(ref, remote.WithAuthFromKeychain(authn.DefaultKeychain), remote.WithContext(ctx))
+	desc, err := remote.Head(ref,
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithContext(ctx),
+	)
 	if err != nil {
 		result.Status = CheckFailed
 		result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)
 		return result
 	}
-
 	result.RemoteDigest = desc.Digest.String()
 
-	// Compare digests. The local digest from Docker might be in different formats.
-	// Normalize: if localDigest contains "@", extract the digest part after "@".
-	local := localDigest
-	if idx := strings.LastIndex(local, "@"); idx >= 0 {
-		local = local[idx+1:]
+	// Any local digest matching remote counts as up-to-date. Strip optional
+	// `repo@` prefix before comparing.
+	for _, ld := range localDigests {
+		if idx := strings.LastIndex(ld, "@"); idx >= 0 {
+			ld = ld[idx+1:]
+		}
+		if ld == result.RemoteDigest {
+			result.Status = UpToDate
+			return result
+		}
 	}
-
-	if local == result.RemoteDigest {
-		result.Status = UpToDate
-	} else {
-		result.Status = UpdateAvailable
-	}
-
+	result.Status = UpdateAvailable
 	return result
 }
 
-// CheckUpdates checks multiple images in sequence (caller can parallelize).
-func CheckUpdates(ctx context.Context, images map[string]string) []CheckResult {
-	results := make([]CheckResult, 0, len(images))
-	for imageRef, localDigest := range images {
-		results = append(results, CheckUpdate(ctx, imageRef, localDigest))
-	}
-	return results
+// IsPinnedRef reports whether an image reference is pinned to an immutable
+// digest (`…@sha256:…`). Digest pins are the only form of "pinned" that
+// can be detected reliably from the reference alone — tag names carry no
+// semantics about mutability (`:14` looks pinned but tracks patch releases;
+// `:beta`, `:next`, `:stable` look custom but float; `:v1.2.3` is pinned
+// in practice but indistinguishable from `:beta` by parsing). For any tag
+// ref we defer to the registry check and let the user decide.
+func IsPinnedRef(imageRef string) bool {
+	return strings.Contains(imageRef, "@")
 }
+

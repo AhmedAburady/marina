@@ -16,24 +16,18 @@ func newRestartCmd(gf *GlobalFlags) *cobra.Command {
 			if gf.Stack == "" && gf.Container == "" {
 				return fmt.Errorf("specify -s <stack> or -c <container>")
 			}
-
 			hc, err := resolveHost(gf)
 			if err != nil {
 				return err
 			}
-
-			w := cmd.OutOrStdout()
-			ctx := cmd.Context()
-
 			if gf.Container != "" {
-				return execWithSpinner(ctx, w, hc,
+				return execWithSpinner(cmd.Context(), cmd.OutOrStdout(), hc,
 					fmt.Sprintf("Restarting container %s on %s...", gf.Container, hc.name),
 					"docker restart "+gf.Container,
 					fmt.Sprintf("Restarted container %q on %q", gf.Container, hc.name),
 				)
 			}
-
-			return execStackWithSpinner(ctx, w, hc, gf.Stack,
+			return execStackWithSpinner(cmd.Context(), cmd.OutOrStdout(), hc, gf.Stack,
 				fmt.Sprintf("Restarting stack %s on %s...", gf.Stack, hc.name),
 				"cd %s && docker compose restart",
 				fmt.Sprintf("Restarted stack %q on %q", gf.Stack, hc.name),

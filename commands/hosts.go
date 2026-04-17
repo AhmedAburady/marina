@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"text/tabwriter"
 	"time"
 
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
-	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -22,13 +21,11 @@ func newHostsCmd(gf *GlobalFlags) *cobra.Command {
 			return runHostsList(cmd, gf)
 		},
 	}
-
 	cmd.AddCommand(
 		newHostsAddCmd(gf),
 		newHostsRemoveCmd(gf),
 		newHostsTestCmd(gf),
 	)
-
 	return cmd
 }
 
@@ -37,42 +34,15 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 	if err != nil {
 		return err
 	}
-
 	if len(cfg.Hosts) == 0 {
 		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
 
-	// Build rows first so we can choose the output format afterwards.
-	var rows [][]string
-	for name, h := range cfg.Hosts {
-		var userDisplay string
-		if h.User != "" {
-			userDisplay = h.User
-		} else if cfg.Settings.Username != "" {
-			userDisplay = cfg.Settings.Username + " (global)"
-		} else {
-			userDisplay = "(none)"
-		}
-		var keyDisplay string
-		if h.SSHKey != "" {
-			keyDisplay = h.SSHKey
-		} else if cfg.Settings.SSHKey != "" {
-			keyDisplay = cfg.Settings.SSHKey + " (global)"
-		} else {
-			keyDisplay = "(none)"
-		}
-		rows = append(rows, []string{name, userDisplay, h.Address, keyDisplay})
-	}
-
-	if gf.Plain {
-		ui.PrintHostTablePlain(cmd.OutOrStdout(), rows)
-		return nil
-	}
-
+	rows := actions.ListHosts(cfg)
 	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY")
-	for _, row := range rows {
-		t.Row(row...)
+	for _, r := range rows {
+		t.Row(r.Name, r.User, r.Address, r.Key)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), t.String())
 	return nil
@@ -85,42 +55,17 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 		Short: "Add a remote Docker host",
 		Example: `  marina hosts add gmktec 10.0.0.50
   marina hosts add pve-arr user@10.0.0.51
-  marina hosts add synology root@synology.tail
   marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, raw := args[0], args[1]
-
-			// Strip accidental ssh:// prefix.
-			raw = strings.TrimPrefix(raw, "ssh://")
-
-			// Split on @ to separate optional user from address.
-			var user, address string
-			if before, after, ok := strings.Cut(raw, "@"); ok {
-				user = before
-				address = after
-			} else {
-				address = raw
-			}
-
-			if address == "" {
-				return fmt.Errorf("address must not be empty (got %q)", args[1])
-			}
-
 			cfg, err := config.Load(gf.Config)
 			if err != nil {
 				return err
 			}
-
-			if _, exists := cfg.Hosts[name]; exists {
-				return fmt.Errorf("host %q already exists; remove it first with: marina hosts remove %s", name, name)
-			}
-
-			cfg.Hosts[name] = &config.HostConfig{Address: address, User: user, SSHKey: sshKey}
-			if err := config.Save(cfg, gf.Config); err != nil {
+			if err := actions.AddHost(cfg, gf.Config, name, raw, sshKey); err != nil {
 				return err
 			}
-
 			hostCfg := cfg.Hosts[name]
 			cmd.Printf("Added host %q (%s)\n", name, hostCfg.SSHAddress(cfg.Settings.Username))
 			return nil
@@ -141,27 +86,13 @@ func newHostsRemoveCmd(gf *GlobalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-
-			var notFound []string
-			var removed []string
-			for _, name := range args {
-				if _, exists := cfg.Hosts[name]; !exists {
-					notFound = append(notFound, name)
-					continue
-				}
-				delete(cfg.Hosts, name)
-				removed = append(removed, name)
+			removed, notFound, err := actions.RemoveHosts(cfg, gf.Config, args...)
+			if err != nil {
+				return err
 			}
-
-			if len(removed) > 0 {
-				if err := config.Save(cfg, gf.Config); err != nil {
-					return err
-				}
-				for _, name := range removed {
-					cmd.Printf("Removed host %q\n", name)
-				}
+			for _, n := range removed {
+				cmd.Printf("Removed host %q\n", n)
 			}
-
 			if len(notFound) > 0 {
 				return fmt.Errorf("host(s) not found: %s", strings.Join(notFound, ", "))
 			}
@@ -181,82 +112,47 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				return err
 			}
 
-			targets := make(map[string]*config.HostConfig)
+			targets := make(map[string]struct{})
 			if len(args) == 1 {
-				name := args[0]
-				h, ok := cfg.Hosts[name]
-				if !ok {
-					return fmt.Errorf("host %q not found", name)
+				if _, ok := cfg.Hosts[args[0]]; !ok {
+					return fmt.Errorf("host %q not found", args[0])
 				}
-				targets[name] = h
+				targets[args[0]] = struct{}{}
 			} else {
-				targets = cfg.Hosts
+				for name := range cfg.Hosts {
+					targets[name] = struct{}{}
+				}
 			}
-
 			if len(targets) == 0 {
 				cmd.Println("No hosts configured.")
 				return nil
 			}
 
-			type testResult struct {
-				host    string
-				ok      bool
-				latency time.Duration
-				err     error
-			}
-
-			results := make(chan testResult, len(targets))
+			results := make(chan actions.TestResult, len(targets))
 			var wg sync.WaitGroup
-
-			for name, h := range targets {
+			for name := range targets {
 				wg.Add(1)
-				go func(name, address, sshKey string) {
+				go func(n string) {
 					defer wg.Done()
-					sshCfg := internalssh.Config{
-						Address: address,
-						KeyPath: sshKey,
-					}
-					start := time.Now()
-					_, err := internalssh.Exec(cmd.Context(), sshCfg, "echo ok")
-					latency := time.Since(start)
-					if err != nil {
-						results <- testResult{host: name, ok: false, err: err}
-					} else {
-						results <- testResult{host: name, ok: true, latency: latency}
-					}
-				}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
+					results <- actions.TestHost(cmd.Context(), cfg, n)
+				}(name)
 			}
-
 			go func() {
 				wg.Wait()
 				close(results)
 			}()
 
-			var collected []testResult
+			var collected []actions.TestResult
 			for r := range results {
 				collected = append(collected, r)
 			}
 
-			if gf.Plain {
-				tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 3, ' ', 0)
-				fmt.Fprintln(tw, "HOST\tSTATUS\tLATENCY")
-				for _, r := range collected {
-					if r.ok {
-						fmt.Fprintf(tw, "%s\tok\t%s\n", r.host, r.latency.Round(time.Millisecond).String())
-					} else {
-						fmt.Fprintf(tw, "%s\t%s\t-\n", r.host, r.err.Error())
-					}
-				}
-				tw.Flush()
-				return nil
-			}
-
 			t := ui.StyledTable("HOST", "STATUS", "LATENCY")
 			for _, r := range collected {
-				if r.ok {
-					t.Row(r.host, "ok", r.latency.Round(time.Millisecond).String())
+				if r.OK {
+					t.Row(r.Host, "ok", r.Latency.Round(time.Millisecond).String())
 				} else {
-					t.Row(r.host, r.err.Error(), "-")
+					t.Row(r.Host, r.Err.Error(), "-")
 				}
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), t.String())
