@@ -10,6 +10,7 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
@@ -403,7 +404,7 @@ func (s *updatesScreen) spinning() bool {
 
 func (s *updatesScreen) buildCheckerCmd() tea.Cmd {
 	return func() tea.Msg {
-		candidates, check, _, err := registry.BuildChecker(s.ctx, s.cfg, s.cfg.Hosts)
+		candidates, check, _, err := registry.BuildChecker(s.ctx, s.cfg, actions.EnabledHosts(s.cfg))
 		return checkerReadyMsg{candidates: candidates, check: check, err: err}
 	}
 }
@@ -698,4 +699,3 @@ func renderBar(width int, frac float64) string {
 	filled := min(int(float64(width)*frac), width)
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
-

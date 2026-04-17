@@ -5,6 +5,8 @@ import (
 	"sort"
 	"time"
 
+	"charm.land/huh/v2/spinner"
+
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/ui"
@@ -37,32 +39,38 @@ func runPs(cmd *cobra.Command, gf *GlobalFlags) error {
 		return err
 	}
 
-	// Single fan-out call — same implementation the TUI uses.
-	results := actions.FetchAllHosts(cmd.Context(), cfg, targets)
+	var results map[string]actions.HostFetchResult
+	spinErr := spinner.New().
+		Type(spinner.MiniDot).
+		Title(fmt.Sprintf("Listing containers on %d host(s)...", len(targets))).
+		Action(func() { results = actions.FetchAllHosts(cmd.Context(), cfg, targets) }).
+		Run()
+	if spinErr != nil {
+		return spinErr
+	}
 
-	var hasResults bool
-	// Stable host ordering.
 	names := make([]string, 0, len(results))
 	for n := range results {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 
+	w := cmd.OutOrStdout()
+	var printed int
 	for _, name := range names {
 		r := results[name]
 		if r.Err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", name, r.Err)
-			continue
+			continue // unreachable hosts surface only in `marina hosts`
 		}
 		label := name
 		if r.FromCache {
 			label += cachedIndicator(r.CachedAt)
 		}
-		ui.PrintContainerTable(cmd.OutOrStdout(), label, r.Containers)
-		hasResults = true
+		ui.PrintContainerTable(w, label, r.Containers)
+		printed++
 	}
 
-	if !hasResults {
+	if printed == 0 {
 		cmd.Println("No container data retrieved.")
 	}
 	return nil

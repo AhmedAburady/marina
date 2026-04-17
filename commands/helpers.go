@@ -57,8 +57,8 @@ func resolveHost(gf *GlobalFlags) (*hostContext, error) {
 }
 
 // resolveTargets builds the target host map following the -H / --all /
-// interactive selector precedence shared across marina commands.
-// Callers must load cfg before calling; this function does not call config.Load.
+// interactive selector precedence. Disabled hosts are filtered out of
+// fan-out operations unless explicitly named via -H.
 func resolveTargets(gf *GlobalFlags, cfg *config.Config) (map[string]*config.HostConfig, error) {
 	if gf.Host != "" {
 		h, ok := cfg.Hosts[gf.Host]
@@ -68,11 +68,12 @@ func resolveTargets(gf *GlobalFlags, cfg *config.Config) (map[string]*config.Hos
 		return map[string]*config.HostConfig{gf.Host: h}, nil
 	}
 	if gf.All {
-		return cfg.Hosts, nil
+		return actions.EnabledHosts(cfg), nil
 	}
-	// Interactive selector.
-	hostNames := make([]string, 0, len(cfg.Hosts))
-	for name := range cfg.Hosts {
+	// Interactive selector — only enabled hosts appear in the picker.
+	enabled := actions.EnabledHosts(cfg)
+	hostNames := make([]string, 0, len(enabled))
+	for name := range enabled {
 		hostNames = append(hostNames, name)
 	}
 	sort.Strings(hostNames)
@@ -83,8 +84,7 @@ func resolveTargets(gf *GlobalFlags, cfg *config.Config) (map[string]*config.Hos
 	if selected != "" {
 		return map[string]*config.HostConfig{selected: cfg.Hosts[selected]}, nil
 	}
-	// Empty string from SelectHost means "all hosts".
-	return cfg.Hosts, nil
+	return enabled, nil
 }
 
 // findStackDir resolves the compose working directory for a stack on the

@@ -8,6 +8,7 @@ import (
 	"charm.land/huh/v2"
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
+	"github.com/AhmedAburady/marina/internal/strutil"
 	"github.com/spf13/cobra"
 )
 
@@ -114,7 +115,7 @@ func runPrune(cmd *cobra.Command, gf *GlobalFlags, imagesOnly, imagesAll, volume
 			fmt.Sprintf("Pruned Docker resources on %q", hc.name),
 		)
 		if err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", hc.name, err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %s\n", hc.name, strutil.FirstLine(err.Error(), 80))
 			failures = append(failures, actions.HostStackErr{Host: hc.name, Err: err})
 		}
 	}

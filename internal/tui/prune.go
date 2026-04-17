@@ -139,7 +139,7 @@ func newPruneScreen(ctx context.Context, cfg *config.Config) *pruneScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 
-	names := slices.Sorted(maps.Keys(cfg.Hosts))
+	names := slices.Sorted(maps.Keys(actions.EnabledHosts(cfg)))
 
 	// Default: every host selected. Matches --all in the CLI and keeps the
 	// common "clean everything" flow to one keystroke.

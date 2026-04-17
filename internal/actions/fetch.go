@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -73,9 +74,33 @@ func FetchAllHosts(
 	return results
 }
 
+// FetchHost fetches one host. Used by the TUI's streaming per-host fetch path.
+// Persistence is handled by the caller (PersistResults) once all hosts have
+// reported in, so we do one atomic write instead of one per host.
+func FetchHost(ctx context.Context, cfg *config.Config, name string, h *config.HostConfig) HostFetchResult {
+	return fetchOneHost(
+		ctx,
+		name,
+		h.SSHAddress(cfg.Settings.Username),
+		h.ResolvedSSHKey(cfg.Settings.SSHKey),
+	)
+}
+
+// stateMu serialises access to state.json. Use RLock for reads, Lock for writes.
+var stateMu sync.RWMutex
+
+// PersistResults writes live-success fetch results to the state cache in one
+// Load→merge→Save cycle. Called by TUI screens once their streaming fetch
+// completes (received == expected) so we do one write instead of N.
+func PersistResults(results map[string]HostFetchResult) {
+	persistSnapshots(results)
+}
+
 // persistSnapshots merges live-fetch results into the state cache in a single
 // Load→merge→Save cycle, avoiding concurrent write races.
 func persistSnapshots(results map[string]HostFetchResult) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
 	// Collect only live-success results — do not overwrite cached entries and
 	// do not clear existing snapshots for failed hosts.
 	var live []HostFetchResult
@@ -136,6 +161,8 @@ func fetchLive(ctx context.Context, address, sshKey string) ([]container.Summary
 }
 
 func loadCachedContainers(host string) ([]container.Summary, time.Time, bool) {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
 	store, err := state.Load("")
 	if err != nil {
 		return nil, time.Time{}, false

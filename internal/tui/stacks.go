@@ -62,22 +62,25 @@ const (
 // stacksScreen aggregates every running Compose stack (and config-registered
 // stacks that are fully stopped) across all hosts.
 type stacksScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	rows    []stackRow // unfiltered
-	visible []stackRow // post-filter — cursor + actions index into this
-	cursor  int
-	loading bool
-	err     error
-	pending map[string]bool
-	errors  map[string]string
-	spinner spinner.Model
-	mode    stacksMode
-	prompt  *confirmPrompt
-	form    *inlineForm
-	filter  filterBar
-	notice  string
-	sb      scrollBody
+	ctx      context.Context
+	cfg      *config.Config
+	rows     []stackRow // unfiltered
+	visible  []stackRow // post-filter — cursor + actions index into this
+	cursor   int
+	loading  bool
+	err      error
+	pending  map[string]bool
+	errors   map[string]string
+	results  map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected int                        // number of HostFetchedMsg we await before clearing loading
+	received int
+	spinner  spinner.Model
+	mode     stacksMode
+	prompt   *confirmPrompt
+	form     *inlineForm
+	filter   filterBar
+	notice   string
+	sb       scrollBody
 }
 
 func newStacksScreen(ctx context.Context, cfg *config.Config) *stacksScreen {
@@ -89,17 +92,31 @@ func newStacksScreen(ctx context.Context, cfg *config.Config) *stacksScreen {
 		loading: true,
 		pending: make(map[string]bool),
 		errors:  make(map[string]string),
+		results: make(map[string]HostFetchResult),
 		spinner: sp,
 		sb:      newScrollBody(),
 		filter:  newFilterBar(),
 	}
 }
 
+// startFetch resets per-host streaming state and returns the enabled hosts map
+// so callers can pass it directly to FetchAllHostsCmd without a second lookup.
+func (s *stacksScreen) startFetch() map[string]*config.HostConfig {
+	hosts := actions.EnabledHosts(s.cfg)
+	s.results = make(map[string]HostFetchResult, len(hosts))
+	s.expected = len(hosts)
+	s.received = 0
+	s.loading = s.expected > 0
+	s.err = nil
+	return hosts
+}
+
 func (s *stacksScreen) Title() string { return "Stacks" }
 
 func (s *stacksScreen) Init() tea.Cmd {
+	hosts := s.startFetch()
 	return tea.Batch(
-		FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+		FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 		s.spinner.Tick,
 	)
 }
@@ -180,9 +197,9 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		case "/":
 			return s, s.filter.Activate()
 		case "R":
-			s.loading = true
+			hosts := s.startFetch()
 			return s, tea.Batch(
-				FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+				FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 				s.spinner.Tick,
 			)
 		case "s":
@@ -203,10 +220,15 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openPurgePrompt()
 		}
 
-	case HostsFetchedMsg:
-		s.loading = false
-		s.err = nil
-		s.buildRows(msg.Results)
+	case HostFetchedMsg:
+		s.results[msg.Host] = msg.Result
+		s.received++
+		s.loading = false // render partial data as it streams in
+		s.buildRows(s.results)
+		if s.received == s.expected && s.expected > 0 {
+			results := s.results
+			return s, func() tea.Msg { actions.PersistResults(results); return nil }
+		}
 
 	case ActionResultMsg:
 		delete(s.pending, msg.Target)
@@ -214,7 +236,7 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.errors[msg.Target] = strutil.FirstLine(msg.Err.Error(), 40)
 		} else {
 			delete(s.errors, msg.Target)
-			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		}
 
 	case SequenceResultsMsg:
@@ -229,14 +251,10 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		if lastOk(msg.Results) {
 			last := msg.Results[len(msg.Results)-1]
 			delete(s.errors, last.Target)
-			// If the last step was config.save (the final purge step),
-			// the config entry has already been removed by PurgePlan's Run.
-			// removePurgedFromConfig syncs the in-memory cfg so the list
-			// refreshes correctly without a re-read from disk.
 			if last.Kind == "config.save" {
 				s.removePurgedFromConfig(last.Target)
 			}
-			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		}
 
 	case spinner.TickMsg:
@@ -365,8 +383,7 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 	for _, host := range hosts {
 		res := results[host]
 		if res.Err != nil {
-			out = append(out, stackRow{host: host, name: "(unreachable)"})
-			continue
+			continue // unreachable hosts surface only in the Hosts screen
 		}
 		hostCfg := s.cfg.Hosts[host]
 		if hostCfg == nil {
@@ -481,7 +498,7 @@ func (s *stacksScreen) openAddForm() {
 		host = r.host
 	}
 	if host == "" {
-		for name := range s.cfg.Hosts {
+		for name := range actions.EnabledHosts(s.cfg) {
 			host = name
 			break
 		}
@@ -540,7 +557,7 @@ func (s *stacksScreen) openUnregisterPrompt() {
 			} else if len(removed) > 0 {
 				s.notice = fmt.Sprintf("Unregistered stack %q from %q", captured.name, captured.host)
 			}
-			return FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		},
 	}
 	s.mode = stacksModeConfirm

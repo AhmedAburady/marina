@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"image/color"
+	"slices"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -87,7 +89,7 @@ func (s *hostsScreen) Help() string {
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · t test · a add · d delete · R refresh · esc back"
+	return "↑/↓ move · / filter · t test · x disable · a add · d delete · R refresh · esc back"
 }
 
 func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -159,6 +161,8 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openAddForm()
 		case "d":
 			s.openDeletePrompt()
+		case "x":
+			s.toggleDisabled()
 		}
 
 	case hostTestResultMsg:
@@ -252,12 +256,18 @@ func (s *hostsScreen) viewList(width, height int) string {
 		[]int{10, 10, 14, 16, 12},
 	)
 	all := make([][]string, 0, len(s.visible))
+	colors := make([]color.Color, 0, len(s.visible))
 	for _, r := range s.visible {
-		all = append(all, []string{r.Name, r.User, r.Address, shortPath(r.Key), s.statusCell(r.Name)})
+		all = append(all, []string{r.Name, r.User, r.Address, shortPath(r.Key), s.statusCell(r)})
+		if r.Disabled {
+			colors = append(colors, cStackStopped)
+		} else {
+			colors = append(colors, nil)
+		}
 	}
-	content, cursorLine, headerLine := flatLines(width,
+	content, cursorLine, headerLine := flatLinesColored(width,
 		[]string{"NAME", "USER", "ADDRESS", "KEY", "STATUS"},
-		widths, all, s.cursor)
+		widths, all, colors, s.cursor)
 
 	bodyHeight := max0(height - len(top) - len(bottom))
 	body := viewportBody(&s.sb, width, bodyHeight, content, cursorLine, headerLine)
@@ -265,25 +275,21 @@ func (s *hostsScreen) viewList(width, height int) string {
 	return panelLines(width, height, lines)
 }
 
-// statusCell returns the STATUS column value for a host. Empty/idle hosts
-// render as an en-dash; in-flight probes show "testing…"; successful
-// probes show the round-trip latency; failures surface the first line of
-// the error, truncated for table width.
-func (s *hostsScreen) statusCell(name string) string {
-	st, ok := s.states[name]
+func (s *hostsScreen) statusCell(r actions.HostRow) string {
+	if r.Disabled {
+		return "disabled"
+	}
+	st, ok := s.states[r.Name]
 	if !ok || (!st.pending && !st.done) {
 		return "–"
 	}
 	if st.pending {
-		return "testing…"
+		return "…"
 	}
 	if st.ok {
 		return fmt.Sprintf("ok %s", st.latency.Round(time.Millisecond))
 	}
-	if st.err == nil {
-		return ""
-	}
-	return strutil.FirstLine(st.err.Error(), 40)
+	return "unreachable"
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
@@ -364,15 +370,48 @@ func (s *hostsScreen) openDeletePrompt() {
 	s.mode = hostsModeConfirmDelete
 }
 
+// toggleDisabled flips the Disabled flag on the host under the cursor and
+// persists immediately. Disabled hosts are skipped by fan-out operations
+// (ps, stacks, check, update, dashboards).
+func (s *hostsScreen) toggleDisabled() {
+	if s.cursor < 0 || s.cursor >= len(s.visible) {
+		return
+	}
+	name := s.visible[s.cursor].Name
+	h, ok := s.cfg.Hosts[name]
+	if !ok {
+		return
+	}
+	newState := !h.Disabled
+	if err := actions.SetHostDisabled(s.cfg, "", name, newState); err != nil {
+		s.notice = "error: " + strutil.FirstLine(err.Error(), 40)
+		return
+	}
+	if newState {
+		s.notice = fmt.Sprintf("Disabled host %q", name)
+		// Drop any test state so a stale pending counter from an in-flight
+		// probe can't keep the footer spinner alive. The probe goroutine
+		// still runs to completion, but its result is ignored on arrival
+		// (state.pending == false → no decrement).
+		if st, ok := s.states[name]; ok && st.pending {
+			s.pending--
+		}
+		delete(s.states, name)
+	} else {
+		s.notice = fmt.Sprintf("Enabled host %q", name)
+	}
+	s.refresh()
+}
+
 func (s *hostsScreen) startTests() tea.Cmd {
-	// Tests every configured host — filter only affects what the user sees,
-	// not what gets probed. Keeping tests against `s.rows` means a filtered
-	// view still gets accurate connectivity data in the background.
 	if len(s.rows) == 0 {
 		return nil
 	}
 	cmds := make([]tea.Cmd, 0, len(s.rows)+1)
 	for _, r := range s.rows {
+		if r.Disabled {
+			continue // disabled hosts are never probed
+		}
 		name := r.Name
 		s.states[name] = &hostTestState{pending: true}
 		s.pending++
@@ -397,8 +436,18 @@ func hostTestCmd(ctx context.Context, cfg *config.Config, host string) tea.Cmd {
 
 // refresh rebuilds the row cache from the in-memory config and reapplies
 // the filter so the visible list stays consistent with the underlying data.
+// Disabled hosts sink to the bottom (enabled alpha, then disabled alpha).
 func (s *hostsScreen) refresh() {
 	s.rows = actions.ListHosts(s.cfg)
+	slices.SortStableFunc(s.rows, func(a, b actions.HostRow) int {
+		if a.Disabled != b.Disabled {
+			if a.Disabled {
+				return 1
+			}
+			return -1
+		}
+		return 0 // ListHosts already alpha-sorted within each bucket
+	})
 	s.rebuildVisible()
 }
 

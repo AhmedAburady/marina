@@ -101,8 +101,15 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 		return err
 	}
 
-	// Single shared fan-out. Cache-fallback handled inside actions.
-	results := actions.FetchAllHosts(cmd.Context(), cfg, targets)
+	var results map[string]actions.HostFetchResult
+	spinErr := spinner.New().
+		Type(spinner.MiniDot).
+		Title(fmt.Sprintf("Listing stacks on %d host(s)...", len(targets))).
+		Action(func() { results = actions.FetchAllHosts(cmd.Context(), cfg, targets) }).
+		Run()
+	if spinErr != nil {
+		return spinErr
+	}
 
 	var all []discovery.Stack
 	names := make([]string, 0, len(results))
@@ -113,8 +120,7 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 	for _, name := range names {
 		r := results[name]
 		if r.Err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", name, r.Err)
-			continue
+			continue // unreachable hosts surface only in `marina hosts`
 		}
 		label := name
 		if r.FromCache {

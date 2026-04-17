@@ -32,6 +32,10 @@ type HostConfig struct {
 	// Stacks maps stack name → compose project directory on the remote host.
 	// Used as a fallback for stacks that are fully stopped (no running containers).
 	Stacks map[string]string `yaml:"stacks,omitempty"`
+	// Disabled skips this host from every operation that fans out across all
+	// hosts (ps, stacks, check, update, TUI dashboards). It still appears in
+	// `marina hosts` so the user can re-enable it.
+	Disabled bool `yaml:"disabled,omitempty"`
 }
 
 // ResolvedSSHKey returns the SSH key path for this host, falling back to

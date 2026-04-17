@@ -439,27 +439,11 @@ func runChecks(
 	return actions.RunChecks(ctx, cfg, targets)
 }
 
-// sendNotifySummary sends a Gotify ping summarising the run. Fires even
-// when every image is current so a scheduled `marina check --notify` run
-// produces a proof-of-life heartbeat instead of silent success — without
-// it, a broken cron / SSH / registry path looks identical to "all good".
+// sendNotifySummary sends a Gotify ping summarising the run.
 func sendNotifySummary(cmd *cobra.Command, cfg *config.Config, results []registry.Result) error {
-	// Classify each row:
-	//   - unreachable hosts appear as synthetic rows from actions.RunChecks
-	//     (Error != nil, Status == "host unreachable") and must be counted
-	//     separately so the heartbeat can distinguish "nothing to do" from
-	//     "scheduled run is silently broken."
-	//   - checked rows are successful registry probes (Error == nil).
-	//   - available rows are a subset of checked where HasUpdate is true.
-	var available, checked int
-	unreachable := make(map[string]struct{})
+	var available int
 	var msg strings.Builder
 	for _, r := range results {
-		if r.Error != nil {
-			unreachable[r.Host] = struct{}{}
-			continue
-		}
-		checked++
 		if !r.HasUpdate {
 			continue
 		}
@@ -468,9 +452,6 @@ func sendNotifySummary(cmd *cobra.Command, cfg *config.Config, results []registr
 		if stack == "" || stack == "-" {
 			stack = "(no stack)"
 		}
-		// host · stack · container → image
-		// Picks delimiters Gotify renders cleanly on mobile: middle-dot
-		// groups the "where", arrow separates from the "what".
 		fmt.Fprintf(&msg, "• %s · %s · %s → %s\n", r.Host, stack, r.Container, r.Image)
 	}
 
@@ -481,31 +462,13 @@ func sendNotifySummary(cmd *cobra.Command, cfg *config.Config, results []registr
 		Priority: cfg.Notify.Gotify.Priority,
 	}
 
-	unreachableList := slices.Sorted(maps.Keys(unreachable))
-	unreachableLine := ""
-	if len(unreachable) > 0 {
-		unreachableLine = fmt.Sprintf("%d host(s) unreachable: %s", len(unreachable), strings.Join(unreachableList, ", "))
-	}
-
 	var title, body string
-	switch {
-	case available > 0:
+	if available > 0 {
 		title = fmt.Sprintf("Marina: %d update(s) available", available)
 		body = msg.String()
-		if unreachableLine != "" {
-			body += "\n" + unreachableLine
-		}
-	case len(unreachable) == len(results) && len(unreachable) > 0:
-		// Every row was a synthetic unreachable placeholder — nothing checked.
-		title = fmt.Sprintf("Marina: %d host(s) unreachable", len(unreachable))
-		body = "No hosts responded. Unreachable: " + strings.Join(unreachableList, ", ")
-	case len(unreachable) > 0:
-		// Partial outage with no updates on the reachable hosts.
-		title = fmt.Sprintf("Marina: %d unreachable, %d up to date", len(unreachable), checked)
-		body = fmt.Sprintf("Checked %d container(s). %s", checked, unreachableLine)
-	default:
+	} else {
 		title = "Marina: all up to date"
-		body = fmt.Sprintf("Checked %d container(s). No updates available.", checked)
+		body = fmt.Sprintf("Checked %d container(s). No updates available.", len(results))
 	}
 
 	if err := notifyPkg.SendGotify(cmd.Context(), gotifyCfg, title, body); err != nil {

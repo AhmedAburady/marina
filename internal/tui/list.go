@@ -174,6 +174,19 @@ func flatLines(
 	rows [][]string,
 	cursor int,
 ) (lines []string, cursorLine, headerLine int) {
+	return flatLinesColored(width, headers, widths, rows, nil, cursor)
+}
+
+// flatLinesColored is flatLines with an optional per-row fg override. Rows
+// whose index is out of range in colors fall back to the default row style.
+func flatLinesColored(
+	width int,
+	headers []string,
+	widths []int,
+	rows [][]string,
+	colors []color.Color,
+	cursor int,
+) (lines []string, cursorLine, headerLine int) {
 	headerLine = 0
 	lines = append(lines, listHeader(width, headers, widths))
 	lines = append(lines, spacer(width))
@@ -182,7 +195,11 @@ func flatLines(
 	cursorLine = -1
 	for i, row := range rows {
 		selected := cursor == i
-		lines = append(lines, listRow(width, row, widths, i, selected))
+		var fg color.Color
+		if i < len(colors) {
+			fg = colors[i]
+		}
+		lines = append(lines, listRowColored(width, row, widths, i, selected, fg))
 		if selected {
 			cursorLine = tableStart + i
 		}

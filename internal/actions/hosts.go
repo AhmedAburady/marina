@@ -16,10 +16,28 @@ import (
 // `marina hosts` table and the TUI Hosts screen render from this shape so
 // column output stays consistent.
 type HostRow struct {
-	Name    string
-	User    string // resolved effective user ("(global)" suffix when inherited)
-	Address string
-	Key     string // resolved key path ("(global)" suffix when inherited)
+	Name     string
+	User     string // resolved effective user ("(global)" suffix when inherited)
+	Address  string
+	Key      string // resolved key path ("(global)" suffix when inherited)
+	Disabled bool
+}
+
+// EnabledHosts returns every non-disabled host in cfg. This is the SINGLE
+// canonical filter for fan-out operations — ps, stacks, check, update,
+// prune, and every TUI screen that fans out. Anything that iterates hosts
+// to probe/act on goes through here, so a host with Disabled=true is
+// invisible to all of them. Explicit per-host targeting via -H / a picker
+// selection bypasses this filter (see resolveTargets).
+func EnabledHosts(cfg *config.Config) map[string]*config.HostConfig {
+	out := make(map[string]*config.HostConfig, len(cfg.Hosts))
+	for name, h := range cfg.Hosts {
+		if h.Disabled {
+			continue
+		}
+		out[name] = h
+	}
+	return out
 }
 
 // ListHosts returns every configured host as a HostRow, sorted by name.
@@ -27,14 +45,26 @@ func ListHosts(cfg *config.Config) []HostRow {
 	out := make([]HostRow, 0, len(cfg.Hosts))
 	for name, h := range cfg.Hosts {
 		out = append(out, HostRow{
-			Name:    name,
-			User:    resolvedUser(h, cfg),
-			Address: h.Address,
-			Key:     resolvedKey(h, cfg),
+			Name:     name,
+			User:     resolvedUser(h, cfg),
+			Address:  h.Address,
+			Key:      resolvedKey(h, cfg),
+			Disabled: h.Disabled,
 		})
 	}
 	slices.SortFunc(out, func(a, b HostRow) int { return cmp.Compare(a.Name, b.Name) })
 	return out
+}
+
+// SetHostDisabled toggles the Disabled flag on a host and persists the config.
+// Returns the new state, or an error if the host isn't configured.
+func SetHostDisabled(cfg *config.Config, configPath, name string, disabled bool) error {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		return fmt.Errorf("host %q not found", name)
+	}
+	h.Disabled = disabled
+	return config.Save(cfg, configPath)
 }
 
 func resolvedUser(h *config.HostConfig, cfg *config.Config) string {
