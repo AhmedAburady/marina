@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -46,29 +47,94 @@ func FetchAllHosts(
 		return results
 	}
 
-	ch := make(chan HostFetchResult, len(targets))
-	var wg sync.WaitGroup
-	for name, h := range targets {
-		wg.Add(1)
-		go func(name, address, sshKey string) {
-			defer wg.Done()
-			ch <- fetchOneHost(ctx, name, address, sshKey)
-		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
+	// Build a flat slice so FanOut can range over it cleanly.
+	type hostEntry struct {
+		name, address, sshKey string
 	}
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
+	entries := make([]hostEntry, 0, len(targets))
+	for name, h := range targets {
+		entries = append(entries, hostEntry{
+			name:    name,
+			address: h.SSHAddress(cfg.Settings.Username),
+			sshKey:  h.ResolvedSSHKey(cfg.Settings.SSHKey),
+		})
+	}
 
-	for r := range ch {
+	for r := range FanOut(ctx, entries, 0, func(ctx context.Context, e hostEntry) HostFetchResult {
+		return fetchOneHost(ctx, e.name, e.address, e.sshKey)
+	}) {
 		results[r.Host] = r
 	}
+
+	// Persist all live-success snapshots in one atomic write: Load once, merge
+	// every live result, Save once. Running this once per fetch (rather than
+	// per-goroutine) avoids concurrent Load→modify→Save races on state.json.
+	persistSnapshots(results)
+
 	return results
+}
+
+// FetchHost fetches one host. Used by the TUI's streaming per-host fetch path.
+// Persistence is handled by the caller (PersistResults) once all hosts have
+// reported in, so we do one atomic write instead of one per host.
+func FetchHost(ctx context.Context, cfg *config.Config, name string, h *config.HostConfig) HostFetchResult {
+	return fetchOneHost(
+		ctx,
+		name,
+		h.SSHAddress(cfg.Settings.Username),
+		h.ResolvedSSHKey(cfg.Settings.SSHKey),
+	)
+}
+
+// stateMu serialises access to state.json. Use RLock for reads, Lock for writes.
+var stateMu sync.RWMutex
+
+// PersistResults writes live-success fetch results to the state cache in one
+// Load→merge→Save cycle. Called by TUI screens once their streaming fetch
+// completes (received == expected) so we do one write instead of N.
+func PersistResults(results map[string]HostFetchResult) {
+	persistSnapshots(results)
+}
+
+// persistSnapshots merges live-fetch results into the state cache in a single
+// Load→merge→Save cycle, avoiding concurrent write races.
+func persistSnapshots(results map[string]HostFetchResult) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	// Collect only live-success results — do not overwrite cached entries and
+	// do not clear existing snapshots for failed hosts.
+	var live []HostFetchResult
+	for _, r := range results {
+		if r.Err == nil && !r.FromCache {
+			live = append(live, r)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+
+	store, err := state.Load("")
+	if err != nil {
+		store = &state.Store{Hosts: make(map[string]*state.HostSnapshot)}
+	}
+	now := time.Now()
+	for _, r := range live {
+		store.Hosts[r.Host] = &state.HostSnapshot{
+			Containers: toStateContainers(r.Containers),
+			UpdatedAt:  now,
+		}
+	}
+	_ = state.Save(store, "")
 }
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
 func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchResult {
+	start := time.Now()
+	defer func() {
+		slog.Debug("fetch.host", "host", host, "elapsed", time.Since(start))
+	}()
+
 	containers, err := fetchLive(ctx, address, sshKey)
 	if err != nil {
 		if cached, cachedAt, ok := loadCachedContainers(host); ok {
@@ -76,9 +142,8 @@ func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchRe
 		}
 		return HostFetchResult{Host: host, Err: err}
 	}
-	_ = state.SaveHostSnapshot(host, &state.HostSnapshot{
-		Containers: toStateContainers(containers),
-	}, "")
+	// Persistence is handled by FetchAllHosts via persistSnapshots once all
+	// goroutines complete.
 	return HostFetchResult{Host: host, Containers: containers}
 }
 
@@ -96,6 +161,8 @@ func fetchLive(ctx context.Context, address, sshKey string) ([]container.Summary
 }
 
 func loadCachedContainers(host string) ([]container.Summary, time.Time, bool) {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
 	store, err := state.Load("")
 	if err != nil {
 		return nil, time.Time{}, false

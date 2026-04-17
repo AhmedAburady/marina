@@ -47,17 +47,17 @@ type CheckFn func(ctx context.Context, c Candidate) Result
 // no TTL — so rows always reflect current reality. The only dedup is an
 // in-cycle sync.Map that prevents multiple containers sharing one image
 // (e.g. three services on `postgres:14`) from issuing the same HEAD N times
-// within a single check pass. The returned *Cache is nil; it exists only
-// so existing call sites keep compiling.
+// within a single check pass.
+//
+// Per-host failures are accepted as partial results: unreachable hosts are
+// returned in hostErrs and the caller synthesises error Result rows for them.
+// The check pass is never aborted due to a single host being unreachable.
 func BuildChecker(
 	ctx context.Context,
 	cfg *config.Config,
 	targets map[string]*config.HostConfig,
-) (candidates []Candidate, check CheckFn, cache *Cache, err error) {
-	candidates, err = gatherCandidates(ctx, cfg, targets)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+) (candidates []Candidate, check CheckFn, hostErrs map[string]error, err error) {
+	candidates, hostErrs = gatherCandidates(ctx, cfg, targets)
 
 	// In-cycle dedup only — each check pass starts with an empty map so
 	// concurrent containers sharing an image share one HEAD, but the NEXT
@@ -119,14 +119,17 @@ func BuildChecker(
 		}
 	}
 
-	return candidates, checkFn, nil, nil
+	return candidates, checkFn, hostErrs, nil
 }
 
 // ── candidate gathering ───────────────────────────────────────────────────────
 
 // gatherCandidates fans out to all target hosts and collects lightweight
 // Candidate entries (no registry check yet — just container list).
-func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[string]*config.HostConfig) ([]Candidate, error) {
+// Per-host failures are returned in the map keyed by host name; the
+// successful candidates from reachable hosts are still returned so the
+// caller can run a partial check pass rather than aborting the whole run.
+func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[string]*config.HostConfig) ([]Candidate, map[string]error) {
 	type hostResult struct {
 		host  string
 		items []Candidate
@@ -151,18 +154,19 @@ func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[strin
 	}()
 
 	var all []Candidate
-	var firstErr error
+	var hostErrs map[string]error
 	for r := range ch {
 		if r.err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("host %q: %w", r.host, r.err)
+			if hostErrs == nil {
+				hostErrs = make(map[string]error)
 			}
+			hostErrs[r.host] = fmt.Errorf("host %q: %w", r.host, r.err)
 			continue
 		}
 		all = append(all, r.items...)
 	}
 
-	return all, firstErr
+	return all, hostErrs
 }
 
 // listCandidatesFromHost connects to one host and returns all containers as
@@ -185,11 +189,12 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 	// Stacks where every service is stopped fall out of the list naturally
 	// because all of their containers get filtered here.
 	//
-	// Inspect each unique *running* image concurrently — transport serializes
-	// via MaxConnsPerHost: 1.
+	// Inspect each unique *running* image sequentially. docker.Transport sets
+	// MaxConnsPerHost = 1, so all Docker API traffic is serialized through a
+	// single SSH pipe anyway — goroutine fan-out here adds mutex + WaitGroup
+	// overhead with no wall-clock benefit. If MaxConnsPerHost is ever raised,
+	// reintroduce concurrency with errgroup.SetLimit(N) to match the new cap.
 	cache := make(map[string]docker.ImageMeta)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	seen := make(map[string]bool)
 	for _, c := range containers {
@@ -200,19 +205,12 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 			continue
 		}
 		seen[c.ImageID] = true
-		wg.Add(1)
-		go func(id, fallbackImage string, cID string) {
-			defer wg.Done()
-			meta, err := dc.InspectContainer(ctx, cID)
-			mu.Lock()
-			if err != nil && meta.Ref == "" {
-				meta.Ref = fallbackImage
-			}
-			cache[id] = meta
-			mu.Unlock()
-		}(c.ImageID, c.Image, c.ID)
+		meta, err := dc.InspectContainer(ctx, c.ID)
+		if err != nil && meta.Ref == "" {
+			meta.Ref = c.Image
+		}
+		cache[c.ImageID] = meta
 	}
-	wg.Wait()
 
 	out := make([]Candidate, 0, len(containers))
 	for _, c := range containers {

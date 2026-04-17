@@ -1,0 +1,3 @@
+{
+  "ignorePatterns": "**/*.md\n**/*.json\n**/*.yml\n**/*.yaml\n**/*.toml\n**/*.txt\n**/*.png\n**/*.jpg\n**/*.jpeg\n**/*.gif\n**/*.svg\n**/*.lock\n**/*.example\n**/go.sum\n**/go.mod\n**/justfile\n**/*.just\n**/LICENSE*\n**/.gitignore\n.agents/**\n.claude/**\n.firecrawl/**\n.github/**\nscratchpad/**\nscreenshots/**\nreview/**\nmarina"
+}

@@ -2,7 +2,8 @@
 package discovery
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 
 	"github.com/docker/docker/api/types/container"
@@ -80,13 +81,15 @@ func GroupByStack(host string, containers []container.Summary, configStacks map[
 	}
 
 	// Sort: running stacks first (by name), stopped stacks last (by name).
-	sort.Slice(stacks, func(i, j int) bool {
-		iStopped := stacks[i].Running == 0
-		jStopped := stacks[j].Running == 0
-		if iStopped != jStopped {
-			return !iStopped // running before stopped
+	slices.SortFunc(stacks, func(a, b Stack) int {
+		aStopped, bStopped := a.Running == 0, b.Running == 0
+		if aStopped != bStopped {
+			if bStopped {
+				return -1 // a running, b stopped → a first
+			}
+			return 1 // a stopped, b running → b first
 		}
-		return stacks[i].Name < stacks[j].Name
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	return stacks

@@ -3,8 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -13,6 +14,7 @@ import (
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // ── Scope ──────────────────────────────────────────────────────────────────
@@ -94,9 +96,9 @@ func pruneExecCmd(ctx context.Context, sshCfg internalssh.Config, host string, o
 		Log().Info("prune.start", "host", host, "cmd", actions.PruneCommand(opts))
 		out, err := actions.Prune(ctx, sshCfg, opts)
 		if err != nil {
-			Log().Warn("prune.fail", "host", host, "err", shortenErr(err, 200), "out", firstChars(out, 200))
+			Log().Warn("prune.fail", "host", host, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 200))
 		} else {
-			Log().Info("prune.ok", "host", host, "out", firstChars(out, 200))
+			Log().Info("prune.ok", "host", host, "out", strutil.FirstLine(out, 200))
 		}
 		return pruneDoneMsg{host: host, output: out, err: err}
 	}
@@ -137,11 +139,7 @@ func newPruneScreen(ctx context.Context, cfg *config.Config) *pruneScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 
-	names := make([]string, 0, len(cfg.Hosts))
-	for n := range cfg.Hosts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(actions.EnabledHosts(cfg)))
 
 	// Default: every host selected. Matches --all in the CLI and keeps the
 	// common "clean everything" flow to one keystroke.
@@ -345,7 +343,7 @@ func (s *pruneScreen) hostStatusCell(h string) string {
 	}
 	if r, ok := s.results[h]; ok {
 		if r.err != nil {
-			return "error: " + firstLineOf(r.err)
+			return "error: " + strutil.FirstLine(r.err.Error(), 40)
 		}
 		if r.reclaimed != "" {
 			return "freed " + r.reclaimed

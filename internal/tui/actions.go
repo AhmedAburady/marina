@@ -8,6 +8,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/actions"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // ActionResultMsg is delivered to a screen's Update when an action finishes.
@@ -36,14 +37,14 @@ type SequenceResultsMsg struct {
 // Note: historically this accepted a free-form command string; that form is
 // retained for compatibility with the Updates screen's multi-step pull+up.
 // New callers should prefer actions.ContainerOp / actions.ComposeOp.
-func DockerExecCmd(sshCfg internalssh.Config, command, kind, target string) tea.Cmd {
+func DockerExecCmd(ctx context.Context, sshCfg internalssh.Config, command, kind, target string) tea.Cmd {
 	return func() tea.Msg {
 		Log().Info("action.start", "kind", kind, "target", target, "host", sshCfg.Address, "cmd", command)
-		out, err := rawExec(sshCfg, command)
+		out, err := rawExec(ctx, sshCfg, command)
 		if err != nil {
-			Log().Warn("action.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 200))
+			Log().Warn("action.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 200))
 		} else {
-			Log().Info("action.ok", "kind", kind, "target", target, "out", firstChars(out, 200))
+			Log().Info("action.ok", "kind", kind, "target", target, "out", strutil.FirstLine(out, 200))
 		}
 		return ActionResultMsg{Kind: kind, Target: target, Output: out, Err: err}
 	}
@@ -55,34 +56,24 @@ func DockerExecCmd(sshCfg internalssh.Config, command, kind, target string) tea.
 // start / ok|fail to ~/.config/marina/marina.log with the full composed
 // command and the first chunk of stdout so users can diagnose silent
 // "apply did nothing" cases via `tail -f`.
-func ComposeExecCmd(sshCfg internalssh.Config, dir, subCmd, kind, target string) tea.Cmd {
+func ComposeExecCmd(ctx context.Context, sshCfg internalssh.Config, dir, subCmd, kind, target string) tea.Cmd {
 	return func() tea.Msg {
 		Log().Info("compose.start", "kind", kind, "target", target, "host", sshCfg.Address, "dir", dir, "sub", subCmd)
-		out, err := actions.ComposeOp(context.Background(), sshCfg, dir, subCmd)
+		out, err := actions.ComposeOp(ctx, sshCfg, dir, subCmd)
 		if err != nil {
-			Log().Warn("compose.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 400))
+			Log().Warn("compose.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 400))
 		} else {
-			Log().Info("compose.ok", "kind", kind, "target", target, "out", firstChars(out, 400))
+			Log().Info("compose.ok", "kind", kind, "target", target, "out", strutil.FirstLine(out, 400))
 		}
 		return ActionResultMsg{Kind: kind, Target: target, Output: out, Err: err}
 	}
 }
 
-// firstChars returns up to n runes of s — safe to log command output
-// snippets without bloating the audit log.
-func firstChars(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
-}
-
 // rawExec is a tiny ssh helper used by DockerExecCmd's free-form path. For
 // anything structured (container verbs, compose subcommands) go through the
 // actions package instead.
-func rawExec(sshCfg internalssh.Config, command string) (string, error) {
-	return internalssh.Exec(context.Background(), sshCfg, command)
+func rawExec(ctx context.Context, sshCfg internalssh.Config, command string) (string, error) {
+	return internalssh.Exec(ctx, sshCfg, command)
 }
 
 // SequenceCmds runs the given tea.Cmds in order, stopping on the first
@@ -119,5 +110,3 @@ func SequenceCmds(cmds ...tea.Cmd) tea.Cmd {
 	}
 }
 
-// Silence unused-import guard when future callers route through actions.
-var _ = internalssh.Config{}

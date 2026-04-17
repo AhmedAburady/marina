@@ -1,10 +1,11 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"image/color"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -12,8 +13,10 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/docker/docker/api/types/container"
 
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // containerRow is one container line in the unified list.
@@ -58,20 +61,23 @@ const (
 // containersScreen lists every container across every configured host, with
 // start/stop/restart/remove actions on the highlighted row.
 type containersScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	rows    []containerRow // unfiltered full list
-	visible []containerRow // post-filter view — cursor + actions index into THIS
-	cursor  int            // position inside visible
-	loading bool
-	err     error
-	pending map[string]bool // container ID → action in-flight
-	errors  map[string]string
-	spinner spinner.Model
-	sb      scrollBody // viewport-backed scroll for long lists
-	mode    containersMode
-	prompt  *confirmPrompt
-	filter  filterBar
+	ctx      context.Context
+	cfg      *config.Config
+	rows     []containerRow // unfiltered full list
+	visible  []containerRow // post-filter view — cursor + actions index into THIS
+	cursor   int            // position inside visible
+	loading  bool
+	err      error
+	pending  map[string]bool // container ID → action in-flight
+	errors   map[string]string
+	results  map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected int                        // number of HostFetchedMsg we await before clearing loading
+	received int
+	spinner  spinner.Model
+	sb       scrollBody // viewport-backed scroll for long lists
+	mode     containersMode
+	prompt   *confirmPrompt
+	filter   filterBar
 }
 
 func newContainersScreen(ctx context.Context, cfg *config.Config) *containersScreen {
@@ -83,19 +89,33 @@ func newContainersScreen(ctx context.Context, cfg *config.Config) *containersScr
 		loading: true,
 		pending: make(map[string]bool),
 		errors:  make(map[string]string),
+		results: make(map[string]HostFetchResult),
 		spinner: sp,
 		sb:      newScrollBody(),
 		filter:  newFilterBar(),
 	}
 }
 
-func (s *containersScreen) Title() string         { return "Containers" }
+func (s *containersScreen) Title() string { return "Containers" }
 
 func (s *containersScreen) Init() tea.Cmd {
+	hosts := s.startFetch()
 	return tea.Batch(
-		FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+		FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 		s.spinner.Tick,
 	)
+}
+
+// startFetch resets per-host streaming state and returns the enabled hosts map
+// so callers can pass it directly to FetchAllHostsCmd without a second lookup.
+func (s *containersScreen) startFetch() map[string]*config.HostConfig {
+	hosts := actions.EnabledHosts(s.cfg)
+	s.results = make(map[string]HostFetchResult, len(hosts))
+	s.expected = len(hosts)
+	s.received = 0
+	s.loading = s.expected > 0
+	s.err = nil
+	return hosts
 }
 
 func (s *containersScreen) Help() string {
@@ -150,9 +170,9 @@ func (s *containersScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		case "/":
 			return s, s.filter.Activate()
 		case "R":
-			s.loading = true
+			hosts := s.startFetch()
 			return s, tea.Batch(
-				FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+				FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 				s.spinner.Tick,
 			)
 		case "s":
@@ -165,20 +185,24 @@ func (s *containersScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openRemovePrompt()
 		}
 
-	case HostsFetchedMsg:
-		s.loading = false
-		s.err = nil
-		s.buildRows(msg.Results)
+	case HostFetchedMsg:
+		s.results[msg.Host] = msg.Result
+		s.received++
+		s.loading = false // render partial data as it streams in
+		s.buildRows(s.results)
+		if s.received == s.expected && s.expected > 0 {
+			results := s.results
+			return s, func() tea.Msg { actions.PersistResults(results); return nil }
+		}
 
 	case ActionResultMsg:
 		delete(s.pending, msg.Target)
 		if msg.Err != nil {
-			s.errors[msg.Target] = firstLineOf(msg.Err)
+			s.errors[msg.Target] = strutil.FirstLine(msg.Err.Error(), 40)
 		} else {
 			delete(s.errors, msg.Target)
-			// Refresh container state after a successful action so status
-			// reflects reality. Cheap compared to the action itself.
-			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			hosts := s.startFetch()
+			return s, FetchAllHostsCmd(s.ctx, s.cfg, hosts)
 		}
 
 	case spinner.TickMsg:
@@ -203,7 +227,7 @@ func (s *containersScreen) View(width, height int) string {
 	if s.err != nil {
 		return panelLines(width, height, []string{
 			spacer(width),
-			errorNote(width, firstLineOf(s.err)),
+			errorNote(width, strutil.FirstLine(s.err.Error(), 40)),
 		})
 	}
 	if len(s.rows) == 0 {
@@ -243,7 +267,7 @@ func (s *containersScreen) View(width, height int) string {
 	// is appended to the STATUS cell so column parity stays intact.
 	inner := innerWidth(width)
 	widths := shareWidths(inner,
-		[]int{2, 3, 4, 3, 3},    // weights
+		[]int{2, 3, 4, 3, 3},     // weights
 		[]int{10, 14, 16, 10, 8}, // floors
 	)
 	all := make([][]string, 0, len(s.visible))
@@ -324,7 +348,7 @@ func (s *containersScreen) buildRemoveCmd(r containerRow) func() tea.Cmd {
 		s.pending[r.id] = true
 		delete(s.errors, r.id)
 		return tea.Batch(
-			DockerExecCmd(r.sshCfg, "docker rm -f "+r.id, "container.remove", r.id),
+			DockerExecCmd(s.ctx, r.sshCfg, "docker rm -f "+r.id, "container.remove", r.id),
 			s.spinner.Tick,
 		)
 	}
@@ -334,15 +358,7 @@ func (s *containersScreen) buildRows(results map[string]HostFetchResult) {
 	var out []containerRow
 	for host, res := range results {
 		if res.Err != nil {
-			// Keep one placeholder row so the user sees the host error.
-			out = append(out, containerRow{
-				host:   host,
-				stack:  "-",
-				name:   "(unreachable)",
-				image:  "",
-				status: firstLineOf(res.Err),
-			})
-			continue
+			continue // unreachable hosts surface only in the Hosts screen
 		}
 		hostCfg := s.cfg.Hosts[host]
 		if hostCfg == nil {
@@ -366,14 +382,8 @@ func (s *containersScreen) buildRows(results map[string]HostFetchResult) {
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].host != out[j].host {
-			return out[i].host < out[j].host
-		}
-		if out[i].stack != out[j].stack {
-			return out[i].stack < out[j].stack
-		}
-		return out[i].name < out[j].name
+	slices.SortFunc(out, func(a, b containerRow) int {
+		return cmp.Or(cmp.Compare(a.host, b.host), cmp.Compare(a.stack, b.stack), cmp.Compare(a.name, b.name))
 	})
 	s.rows = out
 	s.rebuildVisible()
@@ -414,7 +424,7 @@ func (s *containersScreen) runAction(dockerCmd, kind string) tea.Cmd {
 	s.pending[r.id] = true
 	delete(s.errors, r.id)
 	return tea.Batch(
-		DockerExecCmd(r.sshCfg, dockerCmd+" "+r.id, kind, r.id),
+		DockerExecCmd(s.ctx, r.sshCfg, dockerCmd+" "+r.id, kind, r.id),
 		s.spinner.Tick,
 	)
 }

@@ -8,15 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/AhmedAburady/marina/internal/config"
 )
 
-// DefaultPath returns ~/.config/marina/state.json
+// DefaultPath returns the state file path inside the marina config directory.
 func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := config.ResolveConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", fmt.Errorf("resolve config dir: %w", err)
 	}
-	return filepath.Join(home, ".config", "marina", "state.json"), nil
+	return filepath.Join(dir, "state.json"), nil
 }
 
 // HostSnapshot holds the last-known container state for a single host.
@@ -76,17 +78,20 @@ func Load(path string) (*Store, error) {
 	return &store, nil
 }
 
-// Save writes the store to the state file.
+// Save writes the store to the state file atomically.
+// It writes to a temporary file in the same directory, syncs, closes, chmods,
+// then renames over the destination — POSIX-atomic and safe on Windows too.
 func Save(store *Store, path string) error {
 	if path == "" {
-		var err error
-		path, err = DefaultPath()
+		dir, err := config.ResolveConfigDir()
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve config dir: %w", err)
 		}
+		path = filepath.Join(dir, "state.json")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
@@ -95,20 +100,38 @@ func Save(store *Store, path string) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write state %s: %w", path, err)
+	tmp, err := os.CreateTemp(dir, ".state-*.tmp.json")
+	if err != nil {
+		return fmt.Errorf("create temp state file: %w", err)
 	}
+	tmpName := tmp.Name()
+
+	// Ensure the temp file is removed if anything goes wrong after creation.
+	var writeOK bool
+	defer func() {
+		if !writeOK {
+			os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp state %s: %w", tmpName, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp state %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp state %s: %w", tmpName, err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return fmt.Errorf("chmod temp state %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp state to %s: %w", path, err)
+	}
+	writeOK = true
 	return nil
 }
 
-// SaveHostSnapshot updates the snapshot for a single host and persists.
-func SaveHostSnapshot(hostName string, snapshot *HostSnapshot, path string) error {
-	store, err := Load(path)
-	if err != nil {
-		// Non-fatal — start fresh if state is corrupted.
-		store = &Store{Hosts: make(map[string]*HostSnapshot)}
-	}
-	snapshot.UpdatedAt = time.Now()
-	store.Hosts[hostName] = snapshot
-	return Save(store, path)
-}

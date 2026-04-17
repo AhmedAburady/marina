@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -19,13 +21,20 @@ type dashboard struct {
 	stack  []Screen
 	width  int
 	height int
+
+	// progressBar and progressPct cache the last-allocated progress bar so
+	// we don't allocate a new *ProgressBar on every rendered frame. -1 means
+	// no bar has been allocated yet.
+	progressBar *tea.ProgressBar
+	progressPct int
 }
 
 func newDashboard(ctx context.Context, cfg *config.Config) *dashboard {
 	return &dashboard{
-		ctx:   ctx,
-		cfg:   cfg,
-		stack: []Screen{newHomeScreen(ctx, cfg)},
+		ctx:         ctx,
+		cfg:         cfg,
+		stack:       []Screen{newHomeScreen(ctx, cfg)},
+		progressPct: -1,
 	}
 }
 
@@ -38,7 +47,19 @@ func (m *dashboard) Init() tea.Cmd {
 	return m.top().Init()
 }
 
-func (m *dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *dashboard) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
+	defer func() {
+		if r := recover(); r != nil {
+			Log().Error("tui.panic",
+				"msg_type", fmt.Sprintf("%T", msg),
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			model = m
+			cmd = nil
+		}
+	}()
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -71,7 +92,8 @@ func (m *dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to the top screen. Screens may return (possibly a new screen
 	// instance) + a command; we always replace the top entry in place.
-	updated, cmd := m.top().Update(msg)
+	var updated Screen
+	updated, cmd = m.top().Update(msg)
 	m.stack[len(m.stack)-1] = updated
 	return m, cmd
 }
@@ -119,7 +141,11 @@ func (m *dashboard) View() tea.View {
 			} else if pct > 100 {
 				pct = 100
 			}
-			v.ProgressBar = tea.NewProgressBar(tea.ProgressBarDefault, pct)
+			if m.progressPct != pct || m.progressBar == nil {
+				m.progressBar = tea.NewProgressBar(tea.ProgressBarDefault, pct)
+				m.progressPct = pct
+			}
+			v.ProgressBar = m.progressBar
 		}
 	}
 	return v

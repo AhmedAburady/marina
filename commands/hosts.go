@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"charm.land/huh/v2/spinner"
+
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/ui"
@@ -25,6 +27,8 @@ func newHostsCmd(gf *GlobalFlags) *cobra.Command {
 		newHostsAddCmd(gf),
 		newHostsRemoveCmd(gf),
 		newHostsTestCmd(gf),
+		newHostsDisableCmd(gf),
+		newHostsEnableCmd(gf),
 	)
 	return cmd
 }
@@ -40,12 +44,47 @@ func runHostsList(cmd *cobra.Command, gf *GlobalFlags) error {
 	}
 
 	rows := actions.ListHosts(cfg)
-	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY")
+	t := ui.StyledTable("NAME", "USER", "ADDRESS", "KEY", "STATUS")
 	for _, r := range rows {
-		t.Row(r.Name, r.User, r.Address, r.Key)
+		status := "enabled"
+		if r.Disabled {
+			status = "disabled"
+		}
+		t.Row(r.Name, r.User, r.Address, r.Key, status)
 	}
 	fmt.Fprintln(cmd.OutOrStdout(), t.String())
 	return nil
+}
+
+func newHostsDisableCmd(gf *GlobalFlags) *cobra.Command {
+	return newHostsToggleCmd(gf, "disable", "Skip a host from fan-out operations without deleting it", true)
+}
+
+func newHostsEnableCmd(gf *GlobalFlags) *cobra.Command {
+	return newHostsToggleCmd(gf, "enable", "Re-enable a previously disabled host", false)
+}
+
+func newHostsToggleCmd(gf *GlobalFlags, verb, short string, disabled bool) *cobra.Command {
+	return &cobra.Command{
+		Use:   verb + " <name>",
+		Short: short,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load(gf.Config)
+			if err != nil {
+				return err
+			}
+			if err := actions.SetHostDisabled(cfg, gf.Config, args[0], disabled); err != nil {
+				return err
+			}
+			if disabled {
+				cmd.Printf("Disabled host %q\n", args[0])
+			} else {
+				cmd.Printf("Enabled host %q\n", args[0])
+			}
+			return nil
+		},
+	}
 }
 
 func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
@@ -119,7 +158,7 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				}
 				targets[args[0]] = struct{}{}
 			} else {
-				for name := range cfg.Hosts {
+				for name := range actions.EnabledHosts(cfg) {
 					targets[name] = struct{}{}
 				}
 			}
@@ -128,23 +167,31 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				return nil
 			}
 
-			results := make(chan actions.TestResult, len(targets))
-			var wg sync.WaitGroup
-			for name := range targets {
-				wg.Add(1)
-				go func(n string) {
-					defer wg.Done()
-					results <- actions.TestHost(cmd.Context(), cfg, n)
-				}(name)
-			}
-			go func() {
-				wg.Wait()
-				close(results)
-			}()
-
 			var collected []actions.TestResult
-			for r := range results {
-				collected = append(collected, r)
+			spinErr := spinner.New().
+				Type(spinner.MiniDot).
+				Title(fmt.Sprintf("Testing %d host(s)...", len(targets))).
+				Action(func() {
+					results := make(chan actions.TestResult, len(targets))
+					var wg sync.WaitGroup
+					for name := range targets {
+						wg.Add(1)
+						go func(n string) {
+							defer wg.Done()
+							results <- actions.TestHost(cmd.Context(), cfg, n)
+						}(name)
+					}
+					go func() {
+						wg.Wait()
+						close(results)
+					}()
+					for r := range results {
+						collected = append(collected, r)
+					}
+				}).
+				Run()
+			if spinErr != nil {
+				return spinErr
 			}
 
 			t := ui.StyledTable("HOST", "STATUS", "LATENCY")
@@ -152,7 +199,7 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				if r.OK {
 					t.Row(r.Host, "ok", r.Latency.Round(time.Millisecond).String())
 				} else {
-					t.Row(r.Host, r.Err.Error(), "-")
+					t.Row(r.Host, "unreachable", "-")
 				}
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), t.String())

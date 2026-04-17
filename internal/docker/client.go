@@ -12,6 +12,8 @@ import (
 	"github.com/docker/cli/cli/connhelper"
 	"github.com/docker/docker/api/types/container"
 	dockerclient "github.com/docker/docker/client"
+
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 )
 
 // Client wraps a Docker Engine API client for a single remote host.
@@ -25,15 +27,10 @@ type Client struct {
 //
 // sshKeyPath is optional — when non-empty, it is passed as -i to ssh.
 func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client, error) {
-	sshFlags := []string{
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=3",
-	}
-	if sshKeyPath != "" {
-		sshFlags = append(sshFlags, "-i", sshKeyPath)
-	}
-
-	helper, err := connhelper.GetConnectionHelperWithSSHOpts(address, sshFlags)
+	helper, err := connhelper.GetConnectionHelperWithSSHOpts(
+		address,
+		internalssh.Flags(internalssh.Config{KeyPath: sshKeyPath}),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("ssh connection helper for %s: %w", address, err)
 	}

@@ -1,11 +1,13 @@
 package tui
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/AhmedAburady/marina/internal/config"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // ── TUI logger ─────────────────────────────────────────────────────────────
@@ -28,19 +30,14 @@ var (
 	logFile *os.File
 )
 
-// Log returns the package logger. First call opens
-// ~/.config/marina/marina.log; subsequent calls reuse the same handle.
-// The returned logger is always usable — it discards silently on setup
-// failure.
+// Log returns the package logger. First call opens the marina audit log in
+// the canonical config directory (XDG-aware); subsequent calls reuse the
+// same handle. The returned logger is always usable — it discards silently
+// on setup failure so the TUI never crashes due to a log file issue.
 func Log() *slog.Logger {
 	logOnce.Do(func() {
-		home, err := os.UserHomeDir()
-		if err != nil || home == "" {
-			logger = slog.New(slog.DiscardHandler)
-			return
-		}
-		dir := filepath.Join(home, ".config", "marina")
-		if err := os.MkdirAll(dir, 0o700); err != nil {
+		dir, err := config.ResolveConfigDir()
+		if err != nil {
 			logger = slog.New(slog.DiscardHandler)
 			return
 		}
@@ -60,21 +57,10 @@ func Log() *slog.Logger {
 }
 
 // shortenErr extracts the first line of an error message, capped at
-// `maxLen` runes. Keeps log entries readable without multi-line dumps.
+// maxLen runes. Keeps log entries readable without multi-line dumps.
 func shortenErr(err error, maxLen int) string {
 	if err == nil {
 		return ""
 	}
-	s := err.Error()
-	for i, r := range s {
-		if r == '\n' {
-			s = s[:i]
-			break
-		}
-	}
-	if maxLen > 0 && len(s) > maxLen {
-		s = s[:maxLen] + "…"
-		_ = fmt.Sprintf // keep fmt import usable for future helpers
-	}
-	return s
+	return strutil.FirstLine(err.Error(), maxLen)
 }

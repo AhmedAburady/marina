@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"image/color"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -13,8 +14,8 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
-	"github.com/AhmedAburady/marina/internal/discovery"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // CLI-matching semantic colours for stack rows. Values lifted verbatim
@@ -61,22 +62,25 @@ const (
 // stacksScreen aggregates every running Compose stack (and config-registered
 // stacks that are fully stopped) across all hosts.
 type stacksScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	rows    []stackRow // unfiltered
-	visible []stackRow // post-filter — cursor + actions index into this
-	cursor  int
-	loading bool
-	err     error
-	pending map[string]bool
-	errors  map[string]string
-	spinner spinner.Model
-	mode    stacksMode
-	prompt  *confirmPrompt
-	form    *inlineForm
-	filter  filterBar
-	notice  string
-	sb      scrollBody
+	ctx      context.Context
+	cfg      *config.Config
+	rows     []stackRow // unfiltered
+	visible  []stackRow // post-filter — cursor + actions index into this
+	cursor   int
+	loading  bool
+	err      error
+	pending  map[string]bool
+	errors   map[string]string
+	results  map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected int                        // number of HostFetchedMsg we await before clearing loading
+	received int
+	spinner  spinner.Model
+	mode     stacksMode
+	prompt   *confirmPrompt
+	form     *inlineForm
+	filter   filterBar
+	notice   string
+	sb       scrollBody
 }
 
 func newStacksScreen(ctx context.Context, cfg *config.Config) *stacksScreen {
@@ -88,17 +92,31 @@ func newStacksScreen(ctx context.Context, cfg *config.Config) *stacksScreen {
 		loading: true,
 		pending: make(map[string]bool),
 		errors:  make(map[string]string),
+		results: make(map[string]HostFetchResult),
 		spinner: sp,
 		sb:      newScrollBody(),
 		filter:  newFilterBar(),
 	}
 }
 
+// startFetch resets per-host streaming state and returns the enabled hosts map
+// so callers can pass it directly to FetchAllHostsCmd without a second lookup.
+func (s *stacksScreen) startFetch() map[string]*config.HostConfig {
+	hosts := actions.EnabledHosts(s.cfg)
+	s.results = make(map[string]HostFetchResult, len(hosts))
+	s.expected = len(hosts)
+	s.received = 0
+	s.loading = s.expected > 0
+	s.err = nil
+	return hosts
+}
+
 func (s *stacksScreen) Title() string { return "Stacks" }
 
 func (s *stacksScreen) Init() tea.Cmd {
+	hosts := s.startFetch()
 	return tea.Batch(
-		FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+		FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 		s.spinner.Tick,
 	)
 }
@@ -179,9 +197,9 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		case "/":
 			return s, s.filter.Activate()
 		case "R":
-			s.loading = true
+			hosts := s.startFetch()
 			return s, tea.Batch(
-				FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts),
+				FetchAllHostsCmd(s.ctx, s.cfg, hosts),
 				s.spinner.Tick,
 			)
 		case "s":
@@ -202,18 +220,23 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openPurgePrompt()
 		}
 
-	case HostsFetchedMsg:
-		s.loading = false
-		s.err = nil
-		s.buildRows(msg.Results)
+	case HostFetchedMsg:
+		s.results[msg.Host] = msg.Result
+		s.received++
+		s.loading = false // render partial data as it streams in
+		s.buildRows(s.results)
+		if s.received == s.expected && s.expected > 0 {
+			results := s.results
+			return s, func() tea.Msg { actions.PersistResults(results); return nil }
+		}
 
 	case ActionResultMsg:
 		delete(s.pending, msg.Target)
 		if msg.Err != nil {
-			s.errors[msg.Target] = firstLineOf(msg.Err)
+			s.errors[msg.Target] = strutil.FirstLine(msg.Err.Error(), 40)
 		} else {
 			delete(s.errors, msg.Target)
-			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		}
 
 	case SequenceResultsMsg:
@@ -221,19 +244,17 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		for _, r := range msg.Results {
 			delete(s.pending, r.Target)
 			if r.Err != nil {
-				s.errors[r.Target] = firstLineOf(r.Err)
+				s.errors[r.Target] = strutil.FirstLine(r.Err.Error(), 40)
 			}
 		}
 		// After a successful full sequence, drop any prior error + refresh.
 		if lastOk(msg.Results) {
 			last := msg.Results[len(msg.Results)-1]
 			delete(s.errors, last.Target)
-			// If the last step was image prune for a purge, also tidy the
-			// config entry locally.
-			if last.Kind == "image.prune" {
+			if last.Kind == "config.save" {
 				s.removePurgedFromConfig(last.Target)
 			}
-			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		}
 
 	case spinner.TickMsg:
@@ -260,7 +281,7 @@ func (s *stacksScreen) View(width, height int) string {
 	if s.err != nil {
 		return panelLines(width, height, []string{
 			spacer(width),
-			errorNote(width, firstLineOf(s.err)),
+			errorNote(width, strutil.FirstLine(s.err.Error(), 40)),
 		})
 	}
 	if len(s.rows) == 0 {
@@ -353,21 +374,16 @@ func (s *stacksScreen) Modal() (string, bool) {
 
 func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 	// Sort hosts alphabetically, but PRESERVE the per-host ordering that
-	// discovery.GroupByStack returns (running stacks first, stopped last).
+	// actions.StackGroupsFor returns stacks sorted running first, stopped last.
 	// A top-level sort by name would break that invariant and we'd lose
 	// CLI parity — stopped stacks would interleave with running ones.
-	hosts := make([]string, 0, len(results))
-	for h := range results {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
+	hosts := slices.Sorted(maps.Keys(results))
 
 	var out []stackRow
 	for _, host := range hosts {
 		res := results[host]
 		if res.Err != nil {
-			out = append(out, stackRow{host: host, name: "(unreachable)"})
-			continue
+			continue // unreachable hosts surface only in the Hosts screen
 		}
 		hostCfg := s.cfg.Hosts[host]
 		if hostCfg == nil {
@@ -377,7 +393,7 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
 			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
 		}
-		for _, st := range discovery.GroupByStack(host, res.Containers, hostCfg.Stacks) {
+		for _, st := range actions.StackGroupsFor(host, res.Containers, hostCfg.Stacks) {
 			out = append(out, stackRow{
 				host:    host,
 				name:    st.Name,
@@ -424,7 +440,7 @@ func (s *stacksScreen) runCompose(subCmd, kind string) tea.Cmd {
 	s.pending[key] = true
 	delete(s.errors, key)
 	return tea.Batch(
-		ComposeExecCmd(r.sshCfg, r.dir, subCmd, kind, key),
+		ComposeExecCmd(s.ctx, r.sshCfg, r.dir, subCmd, kind, key),
 		s.spinner.Tick,
 	)
 }
@@ -441,8 +457,8 @@ func (s *stacksScreen) runUpdate() tea.Cmd {
 	delete(s.errors, key)
 	return tea.Batch(
 		SequenceCmds(
-			ComposeExecCmd(r.sshCfg, r.dir, "pull", "compose.pull", key),
-			ComposeExecCmd(r.sshCfg, r.dir, "up -d", "compose.up", key),
+			ComposeExecCmd(s.ctx, r.sshCfg, r.dir, "pull", "compose.pull", key),
+			ComposeExecCmd(s.ctx, r.sshCfg, r.dir, "up -d", "compose.up", key),
 		),
 		s.spinner.Tick,
 	)
@@ -482,7 +498,7 @@ func (s *stacksScreen) openAddForm() {
 		host = r.host
 	}
 	if host == "" {
-		for name := range s.cfg.Hosts {
+		for name := range actions.EnabledHosts(s.cfg) {
 			host = name
 			break
 		}
@@ -537,18 +553,20 @@ func (s *stacksScreen) openUnregisterPrompt() {
 		onYes: func() tea.Cmd {
 			removed, _, err := actions.UnregisterStacks(s.cfg, "", captured.host, captured.name)
 			if err != nil {
-				s.notice = "error: " + firstLineOf(err)
+				s.notice = "error: " + strutil.FirstLine(err.Error(), 40)
 			} else if len(removed) > 0 {
 				s.notice = fmt.Sprintf("Unregistered stack %q from %q", captured.name, captured.host)
 			}
-			return FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
+			return FetchAllHostsCmd(s.ctx, s.cfg, s.startFetch())
 		},
 	}
 	s.mode = stacksModeConfirm
 }
 
 // buildPurgeCmd captures the current row and builds the multi-step purge.
-// The closure defers row lookup so the user's focus at confirm-time is used.
+// Steps are driven by actions.PurgePlan so CLI and TUI always execute the
+// same sequence — any future step (volume removal, name normalization, etc.)
+// added to PurgePlan is automatically picked up here.
 func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	r := s.currentRow()
 	if r == nil || r.dir == "" {
@@ -557,14 +575,33 @@ func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	captured := *r
 	key := captured.host + "/" + captured.name
 	return func() tea.Cmd {
+		// Use the no-SSH variant — captured.dir is already known from the
+		// displayed row, and this closure runs on the BubbleTea event loop.
+		steps, err := actions.PurgePlanFromDir(s.ctx, s.cfg, "", captured.host, captured.name, captured.dir)
+		if err != nil {
+			s.errors[key] = strutil.FirstLine(err.Error(), 40)
+			return nil
+		}
+		cmds := make([]tea.Cmd, 0, len(steps))
+		for _, step := range steps {
+			st := step // capture loop variable
+			switch st.Kind {
+			case "compose.down":
+				cmds = append(cmds, ComposeExecCmd(s.ctx, captured.sshCfg, st.Dir, st.SubCmd, st.Kind, key))
+			case "config.save":
+				// config.save has no remote SSH component; wrap Run directly.
+				cmds = append(cmds, func() tea.Msg {
+					return ActionResultMsg{Kind: st.Kind, Target: key, Err: st.Run()}
+				})
+			default:
+				// "dir.rm", "image.prune" and any future raw-shell steps.
+				cmds = append(cmds, DockerExecCmd(s.ctx, captured.sshCfg, st.Command, st.Kind, key))
+			}
+		}
 		s.pending[key] = true
 		delete(s.errors, key)
 		return tea.Batch(
-			SequenceCmds(
-				ComposeExecCmd(captured.sshCfg, captured.dir, "down --remove-orphans", "compose.down", key),
-				DockerExecCmd(captured.sshCfg, "rm -rf "+shellQuote(captured.dir), "dir.rm", key),
-				DockerExecCmd(captured.sshCfg, "docker image prune -f", "image.prune", key),
-			),
+			SequenceCmds(cmds...),
 			s.spinner.Tick,
 		)
 	}
@@ -621,12 +658,3 @@ func splitKey(key string) (host, name string) {
 	return before, after
 }
 
-// shellQuote wraps a path in single quotes for safe use in a remote shell.
-// Paths with embedded quotes are rejected (returned empty) so we never issue
-// a malformed command.
-func shellQuote(s string) string {
-	if strings.ContainsAny(s, "'\"\\") {
-		return ""
-	}
-	return "'" + s + "'"
-}

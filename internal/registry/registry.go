@@ -3,12 +3,26 @@ package registry
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
+
+// sharedTransport is a package-level HTTP transport for all registry requests.
+// It clones the default transport (preserving proxy + dial settings) and
+// tightens timeout and connection-pool parameters to avoid hung registry calls.
+var sharedTransport = func() *http.Transport {
+	base := http.DefaultTransport.(*http.Transport).Clone()
+	base.ResponseHeaderTimeout = 15 * time.Second
+	base.TLSHandshakeTimeout = 10 * time.Second
+	base.MaxIdleConnsPerHost = 4
+	return base
+}()
 
 // UpdateStatus represents whether an image has an update available.
 type UpdateStatus int
@@ -73,10 +87,15 @@ func CheckUpdate(ctx context.Context, imageRef string, localDigests []string) Ch
 	desc, err := remote.Head(ref,
 		remote.WithAuthFromKeychain(authn.DefaultKeychain),
 		remote.WithContext(ctx),
+		remote.WithTransport(sharedTransport),
 	)
 	if err != nil {
 		result.Status = CheckFailed
-		result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)
+		if terr, ok := err.(*transport.Error); ok && terr.StatusCode == 429 {
+			result.Error = fmt.Errorf("%w: fetch remote digest for %q: %s", ErrRateLimited, imageRef, terr.Error())
+		} else {
+			result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)
+		}
 		return result
 	}
 	result.RemoteDigest = desc.Digest.String()

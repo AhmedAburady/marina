@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"syscall"
 
@@ -15,6 +16,12 @@ import (
 var version = "dev"
 
 func main() {
+	// Silence the default slog logger so nothing in the codebase can leak
+	// log lines into the terminal. --debug (handled in commands/root.go)
+	// promotes this to a stderr handler; the TUI uses its own file-backed
+	// audit logger via tui.Log() which is independent of the default.
+	slog.SetDefault(slog.New(slog.DiscardHandler))
+
 	root := commands.NewRootCmd(version)
 	if err := fang.Execute(context.Background(), root,
 		fang.WithVersion(version),

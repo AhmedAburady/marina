@@ -1,17 +1,20 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 type updatesPhase int
@@ -49,6 +52,12 @@ type updatesScreen struct {
 	checked int
 	total   int
 	results []registry.Result
+
+	// visible is the post-filter subset of results; visibleToAbs maps each
+	// visible index back to its position in results. Populated by
+	// rebuildVisible(); callers must not walk results directly for display.
+	visible      []registry.Result
+	visibleToAbs []int
 
 	cursor   int
 	selected map[int]bool
@@ -126,6 +135,7 @@ func (s *updatesScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	// ignore it because there's nothing to filter against.
 	if s.phase == phaseUpdatesResults {
 		if handled, cmd := s.filter.Update(msg); handled {
+			s.rebuildVisible()
 			s.cursor = 0
 			return s, cmd
 		}
@@ -136,6 +146,7 @@ func (s *updatesScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		if msg.String() == "esc" || msg.String() == "left" {
 			if s.phase == phaseUpdatesResults && s.filter.HasQuery() {
 				s.filter.Clear()
+				s.rebuildVisible()
 				s.cursor = 0
 				return s, nil
 			}
@@ -213,26 +224,26 @@ func (s *updatesScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 func (s *updatesScreen) handleKey(msg tea.KeyPressMsg) (Screen, tea.Cmd) {
 	switch s.phase {
 	case phaseUpdatesResults:
-		items := s.filteredItems()
 		switch msg.String() {
 		case "up", "k":
 			if s.cursor > 0 {
 				s.cursor--
 			}
 		case "down", "j":
-			if s.cursor < len(items)-1 {
+			if s.cursor < len(s.visible)-1 {
 				s.cursor++
 			}
 		case "space", " ":
-			if len(items) == 0 {
+			if len(s.visible) == 0 {
 				return s, nil
 			}
-			idx := s.absoluteIndex(s.cursor)
+			idx := s.visibleToAbs[s.cursor]
 			s.selected[idx] = !s.selected[idx]
 		case "a":
 			s.toggleAll()
 		case "t":
 			s.showAll = !s.showAll
+			s.rebuildVisible()
 			s.cursor = 0
 		case "/":
 			return s, s.filter.Activate()
@@ -294,7 +305,6 @@ func (s *updatesScreen) viewProgress(width, height int) string {
 }
 
 func (s *updatesScreen) viewResults(width, height int) string {
-	items := s.filteredItems()
 	updates := s.countUpdates()
 
 	// Top: summary counter + optional filter bar.
@@ -305,12 +315,12 @@ func (s *updatesScreen) viewResults(width, height int) string {
 		tag = "showing all"
 	}
 	top = append(top, summaryLine(width, fmt.Sprintf("%d update(s) available", updates), tag))
-	if bar := s.filter.View(width, len(items)); bar != "" {
+	if bar := s.filter.View(width, len(s.visible)); bar != "" {
 		top = append(top, bar)
 	}
 	top = append(top, spacer(width))
 
-	if len(items) == 0 {
+	if len(s.visible) == 0 {
 		top = append(top, mutedLine(width, "All images are up-to-date."))
 		return panelLines(width, height, top)
 	}
@@ -328,9 +338,9 @@ func (s *updatesScreen) viewResults(width, height int) string {
 		[]int{2, 3, 4, 3},
 		[]int{12, 14, 18, 12},
 	)
-	all := make([][]string, 0, len(items))
-	for i, item := range items {
-		absIdx := s.absoluteIndex(i)
+	all := make([][]string, 0, len(s.visible))
+	for i, item := range s.visible {
+		absIdx := s.visibleToAbs[i]
 		mark := "  "
 		if s.selected[absIdx] {
 			mark = "✓ "
@@ -353,7 +363,7 @@ func (s *updatesScreen) viewDone(width, height int) string {
 	var lines []string
 	lines = append(lines, spacer(width))
 	if s.err != nil {
-		lines = append(lines, errorNote(width, firstLineOf(s.err)))
+		lines = append(lines, errorNote(width, strutil.FirstLine(s.err.Error(), 40)))
 		return panelLines(width, height, lines)
 	}
 	if s.appliedOk+s.appliedFail == 0 {
@@ -394,10 +404,14 @@ func (s *updatesScreen) spinning() bool {
 
 func (s *updatesScreen) buildCheckerCmd() tea.Cmd {
 	return func() tea.Msg {
-		candidates, check, _, err := registry.BuildChecker(s.ctx, s.cfg, s.cfg.Hosts)
+		candidates, check, _, err := registry.BuildChecker(s.ctx, s.cfg, actions.EnabledHosts(s.cfg))
 		return checkerReadyMsg{candidates: candidates, check: check, err: err}
 	}
 }
+
+// Note: actions.RunChecks is the CLI/cron entry point for checks with
+// errgroup concurrency limiting. The TUI retains its per-candidate fan-out
+// (buildCheckerCmd → checkOneCmd) to preserve the real-time progress bar.
 
 func (s *updatesScreen) checkOneCmd(c registry.Candidate) tea.Cmd {
 	return func() tea.Msg {
@@ -431,15 +445,8 @@ func shortDigest(d string) string {
 // finishChecks sorts results and auto-selects every row that has an update.
 // No persistent cache — every check cycle hits the registry fresh.
 func (s *updatesScreen) finishChecks() {
-	sort.Slice(s.results, func(i, j int) bool {
-		a, b := s.results[i], s.results[j]
-		if a.Host != b.Host {
-			return a.Host < b.Host
-		}
-		if a.Stack != b.Stack {
-			return a.Stack < b.Stack
-		}
-		return a.Container < b.Container
+	slices.SortFunc(s.results, func(a, b registry.Result) int {
+		return cmp.Or(cmp.Compare(a.Host, b.Host), cmp.Compare(a.Stack, b.Stack), cmp.Compare(a.Container, b.Container))
 	})
 	s.selected = make(map[int]bool)
 	for i, r := range s.results {
@@ -447,32 +454,16 @@ func (s *updatesScreen) finishChecks() {
 			s.selected[i] = true
 		}
 	}
+	s.rebuildVisible()
 	s.phase = phaseUpdatesResults
 }
 
-// filteredItems returns the rows visible under the current filter chain.
-// Two layers stack: `t` (showAll) — when false, drop rows with no update —
-// and the `/` text filter, which looks for substring matches across the
-// host / stack / container / image / status cells.
-func (s *updatesScreen) filteredItems() []registry.Result {
-	out := make([]registry.Result, 0, len(s.results))
-	for _, r := range s.results {
-		if !s.showAll && !r.HasUpdate {
-			continue
-		}
-		if !s.filter.Match(r.Host, r.Stack, r.Container, r.ImageRef, r.Status) {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out
-}
-
-// absoluteIndex maps a cursor index in the filtered list back to s.results
-// so selection state stays stable as filters toggle. Must use the same
-// predicates as filteredItems above — keep them in sync.
-func (s *updatesScreen) absoluteIndex(visibleIdx int) int {
-	seen := 0
+// rebuildVisible repopulates s.visible and s.visibleToAbs from s.results
+// applying the showAll flag and text filter. Call whenever results, showAll,
+// or the filter query changes — not on every Update tick.
+func (s *updatesScreen) rebuildVisible() {
+	s.visible = s.visible[:0]
+	s.visibleToAbs = s.visibleToAbs[:0]
 	for i, r := range s.results {
 		if !s.showAll && !r.HasUpdate {
 			continue
@@ -480,32 +471,34 @@ func (s *updatesScreen) absoluteIndex(visibleIdx int) int {
 		if !s.filter.Match(r.Host, r.Stack, r.Container, r.ImageRef, r.Status) {
 			continue
 		}
-		if seen == visibleIdx {
-			return i
-		}
-		seen++
+		s.visible = append(s.visible, r)
+		s.visibleToAbs = append(s.visibleToAbs, i)
 	}
-	return -1
+	if s.cursor >= len(s.visible) {
+		s.cursor = max0(len(s.visible) - 1)
+	}
+	if s.cursor < 0 {
+		s.cursor = 0
+	}
 }
 
 func (s *updatesScreen) toggleAll() {
-	items := s.filteredItems()
 	// If every visible item is selected, clear; otherwise select all visible.
 	allOn := true
-	for i := range items {
-		if !s.selected[s.absoluteIndex(i)] {
+	for _, absIdx := range s.visibleToAbs {
+		if !s.selected[absIdx] {
 			allOn = false
 			break
 		}
 	}
 	if allOn {
-		for i := range items {
-			delete(s.selected, s.absoluteIndex(i))
+		for _, absIdx := range s.visibleToAbs {
+			delete(s.selected, absIdx)
 		}
 		return
 	}
-	for i := range items {
-		s.selected[s.absoluteIndex(i)] = true
+	for _, absIdx := range s.visibleToAbs {
+		s.selected[absIdx] = true
 	}
 }
 
@@ -578,8 +571,8 @@ func (s *updatesScreen) startApply() tea.Cmd {
 		}
 		key := k.host + "/" + k.stack
 		cmds = append(cmds, SequenceCmds(
-			ComposeExecCmd(sshCfg, dir, "pull", "compose.pull", key),
-			ComposeExecCmd(sshCfg, dir, "up -d", "compose.up", key),
+			ComposeExecCmd(s.ctx, sshCfg, dir, "pull", "compose.pull", key),
+			ComposeExecCmd(s.ctx, sshCfg, dir, "up -d", "compose.up", key),
 		))
 	}
 	cmds = append(cmds, s.spinner.Tick)
@@ -617,7 +610,7 @@ func (s *updatesScreen) startPostApplyPrune() tea.Cmd {
 			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
 		}
 		cmds = append(cmds, SequenceCmds(
-			DockerExecCmd(sshCfg, "docker image prune -f", "image.prune", host),
+			DockerExecCmd(s.ctx, sshCfg, "docker image prune -f", "image.prune", host),
 		))
 	}
 	cmds = append(cmds, s.spinner.Tick)
@@ -648,6 +641,8 @@ func (s *updatesScreen) uniqueAppliedHosts() []string {
 func (s *updatesScreen) finishAndRecheck() tea.Cmd {
 	s.phase = phaseUpdatesLoading
 	s.results = nil
+	s.visible = nil
+	s.visibleToAbs = nil
 	s.selected = make(map[int]bool)
 	s.cursor = 0
 	s.checked = 0
@@ -704,8 +699,3 @@ func renderBar(width int, frac float64) string {
 	filled := min(int(float64(width)*frac), width)
 	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
 }
-
-// config import is retained so we reference it — currently unused here but
-// newUpdatesScreen signature uses it for consistency with the other
-// constructors.
-var _ = config.Load
