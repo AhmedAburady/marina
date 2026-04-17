@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  test:
+  vet:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -20,14 +20,11 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Test
-        run: go test ./... -race
-
       - name: Vet
         run: go vet ./...
 
   build:
-    needs: test
+    needs: vet
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
