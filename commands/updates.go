@@ -50,18 +50,17 @@ func newCheckCmd(gf *GlobalFlags) *cobra.Command {
 }
 
 func newUpdateCmd(gf *GlobalFlags) *cobra.Command {
-	var yes, stream bool
+	var yes bool
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Apply available image updates",
 		Example: `  marina update --all --yes
-  marina update -H myhost -s mystack --stream`,
+  marina update -H myhost -s mystack`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateApply(cmd, gf, yes, stream)
+			return runUpdateApply(cmd, gf, yes)
 		},
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the interactive confirmation prompt")
-	cmd.Flags().BoolVar(&stream, "stream", false, "Stream docker compose output live instead of running behind a spinner")
 	return cmd
 }
 
@@ -127,9 +126,9 @@ func runCheckCmd(cmd *cobra.Command, gf *GlobalFlags, notify bool) error {
 
 // runUpdateApply gathers check results once, confirms with the user (unless
 // --yes bypasses), then runs `docker compose pull && up -d` for each stack
-// whose images have updates. Output defaults to behind a spinner; pass
-// `--stream` to see live docker compose progress instead.
-func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error {
+// whose images have updates. All work runs behind a spinner with a summary
+// printed at the end.
+func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
 	cfg, err := config.Load(gf.Config)
 	if err != nil {
 		return err
@@ -234,10 +233,9 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 	case len(hostGroups) == 0:
 		// nothing to apply — already printed "All images are up-to-date."
 	case len(hostGroups) == 1:
-		// Single-host fast path: keep the existing spinner / stream behaviour
-		// verbatim since there's nothing to parallelise.
+		// Single-host fast path: spinner only, no parallelism to do.
 		for _, k := range keys {
-			if err := runStackUpdate(cmd.Context(), w, ew, cfg, k, stackDirs[k], stream); err != nil {
+			if err := runStackUpdate(cmd.Context(), w, ew, cfg, k, stackDirs[k]); err != nil {
 				failures = append(failures, actions.HostStackErr{Host: k.Host, Stack: k.Stack, Err: err})
 			}
 		}
@@ -284,7 +282,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 		pruneHosts := slices.Sorted(maps.Keys(targets))
 
 		if len(pruneHosts) == 1 {
-			if err := runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0], stream); err != nil {
+			if err := runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0]); err != nil {
 				failures = append(failures, actions.HostStackErr{Host: pruneHosts[0], Err: err})
 			}
 		} else if len(pruneHosts) > 1 {
@@ -318,11 +316,11 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 	return actions.NewApplyErr("update", failures)
 }
 
-// runStackUpdate is the single-host path: spinner or streaming per --stream.
-// Delegates to actions.ApplyStackUpdate for two-step pull+up semantics that
-// match the TUI's SequenceCmds(pull, up) flow. Returns the first error
-// encountered so the caller can accumulate failures.
-func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string, stream bool) error {
+// runStackUpdate is the single-host path. Delegates to actions.ApplyStackUpdate
+// for two-step pull+up semantics that match the TUI's SequenceCmds(pull, up)
+// flow. Returns the first error encountered so the caller can accumulate
+// failures.
+func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string) error {
 	hostCfg := cfg.Hosts[k.Host]
 	sshCfg := internalssh.Config{
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
@@ -342,35 +340,26 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 	title := fmt.Sprintf("Updating stack %q on %q...", k.Stack, k.Host)
 	doneMsg := fmt.Sprintf("Updated stack %q on %q.", k.Stack, k.Host)
 
-	if stream {
-		fmt.Fprintf(w, "\n── %s ──\n", title)
-		if err := actions.ApplyStackUpdate(ctx, sshCfg, dir, w); err != nil {
-			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
-			return err
-		}
-		fmt.Fprintln(w, doneMsg)
-	} else {
-		var buf bytes.Buffer
-		var applyErr error
-		spinErr := spinner.New().
-			Type(spinner.MiniDot).
-			Title(title).
-			Action(func() { applyErr = actions.ApplyStackUpdate(ctx, sshCfg, dir, &buf) }).
-			Run()
-		if spinErr != nil {
-			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, spinErr)
-			return spinErr
-		}
-		if applyErr != nil {
-			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, applyErr)
-			return applyErr
-		}
-		fmt.Fprintln(w)
-		if buf.Len() > 0 {
-			fmt.Fprint(w, buf.String())
-		}
-		fmt.Fprintln(w, doneMsg)
+	var buf bytes.Buffer
+	var applyErr error
+	spinErr := spinner.New().
+		Type(spinner.MiniDot).
+		Title(title).
+		Action(func() { applyErr = actions.ApplyStackUpdate(ctx, sshCfg, dir, &buf) }).
+		Run()
+	if spinErr != nil {
+		fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, spinErr)
+		return spinErr
 	}
+	if applyErr != nil {
+		fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, applyErr)
+		return applyErr
+	}
+	fmt.Fprintln(w)
+	if buf.Len() > 0 {
+		fmt.Fprint(w, buf.String())
+	}
+	fmt.Fprintln(w, doneMsg)
 	return nil
 }
 
@@ -394,10 +383,10 @@ func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, di
 	return actions.ApplyStackUpdate(ctx, sshCfg, dir, io.Discard)
 }
 
-// runHostPrune / runHostPruneQuiet mirror the stack helpers for the
-// post-apply image prune pass. Delegate to actions.PruneHost. Returns the
-// first error encountered so the caller can accumulate failures.
-func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string, stream bool) error {
+// runHostPrune is the single-host post-apply image prune path. Delegates to
+// actions.PruneHost. Returns the first error encountered so the caller can
+// accumulate failures.
+func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string) error {
 	hostCfg := cfg.Hosts[host]
 	sshCfg := internalssh.Config{
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
@@ -405,35 +394,27 @@ func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host
 	}
 	title := fmt.Sprintf("Pruning old images on %q...", host)
 	doneMsg := fmt.Sprintf("Pruned old images on %q.", host)
-	if stream {
-		fmt.Fprintf(w, "\n── %s ──\n", title)
-		if err := actions.PruneHost(ctx, sshCfg, w); err != nil {
-			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
-			return err
-		}
-		fmt.Fprintln(w, doneMsg)
-	} else {
-		var buf bytes.Buffer
-		var pruneErr error
-		spinErr := spinner.New().
-			Type(spinner.MiniDot).
-			Title(title).
-			Action(func() { pruneErr = actions.PruneHost(ctx, sshCfg, &buf) }).
-			Run()
-		if spinErr != nil {
-			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, spinErr)
-			return spinErr
-		}
-		if pruneErr != nil {
-			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, pruneErr)
-			return pruneErr
-		}
-		fmt.Fprintln(w)
-		if buf.Len() > 0 {
-			fmt.Fprint(w, buf.String())
-		}
-		fmt.Fprintln(w, doneMsg)
+
+	var buf bytes.Buffer
+	var pruneErr error
+	spinErr := spinner.New().
+		Type(spinner.MiniDot).
+		Title(title).
+		Action(func() { pruneErr = actions.PruneHost(ctx, sshCfg, &buf) }).
+		Run()
+	if spinErr != nil {
+		fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, spinErr)
+		return spinErr
 	}
+	if pruneErr != nil {
+		fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, pruneErr)
+		return pruneErr
+	}
+	fmt.Fprintln(w)
+	if buf.Len() > 0 {
+		fmt.Fprint(w, buf.String())
+	}
+	fmt.Fprintln(w, doneMsg)
 	return nil
 }
 

@@ -5,9 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"time"
 )
@@ -37,20 +35,6 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 
 	if cfg.URL == "" || token == "" {
 		return fmt.Errorf("gotify not configured: url and token are required")
-	}
-
-	// Enforce HTTPS unless the target is a loopback address (local dev / test).
-	u, err := url.Parse(cfg.URL)
-	if err != nil {
-		return fmt.Errorf("gotify url is invalid: %w", err)
-	}
-	if u.Scheme != "https" {
-		host := u.Hostname()
-		ip := net.ParseIP(host)
-		isLoopback := host == "localhost" || (ip != nil && ip.IsLoopback())
-		if !isLoopback {
-			return fmt.Errorf("gotify url must use https (got %q); use https:// to protect your token in transit", cfg.URL)
-		}
 	}
 
 	payload := map[string]any{

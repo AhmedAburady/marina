@@ -97,12 +97,14 @@ settings:
 
 notifications:
   gotify:
-    url: https://gotify.example.com
-    token: your-app-token
+    url: https://gotify.example.com   # https recommended; http works but ships the token in clear
+    token: your-app-token              # or use token_env: MARINA_GOTIFY_TOKEN
     priority: 5
 ```
 
 Per-host fields override `settings`. `stacks` entries are optional — they let Marina surface compose stacks that are currently stopped (and therefore invisible to `docker ps`).
+
+**Gotify TLS**: Marina does not enforce `https://` — if you point it at `http://gotify.lan`, the notification will still send and your app token will travel in cleartext on whatever network sits between Marina and the Gotify server. For a homelab on a Tailscale tailnet, [Tailscale's auto-HTTPS](https://tailscale.com/kb/1153/enabling-https) is the easy path; otherwise any reverse proxy with a Let's Encrypt cert in front of Gotify works. Token storage: the app token in `config.yaml` lives in plaintext — keep the file at `0600`, or use `token_env:` to read it from an environment variable instead.
 
 ## Dashboard (TUI)
 

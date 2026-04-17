@@ -17,6 +17,9 @@ settings:
 
 notifications:
   gotify:
+    # Prefer https:// — the app token travels in the X-Gotify-Key header.
+    # http:// works too (not enforced); your token is then sent in clear over
+    # whatever network sits between marina and the Gotify server.
     url: https://gotify.yourdomain.com
     # prefer token_env over token (keeps secret out of config file)
     # token_env: MARINA_GOTIFY_TOKEN   # read token from this env var
