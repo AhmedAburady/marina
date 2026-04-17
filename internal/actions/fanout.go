@@ -7,9 +7,10 @@ import (
 )
 
 // FanOut runs fn concurrently over items and yields results as they arrive
-// (completion order, not input order). The caller must either fully consume
-// the iterator or cancel ctx — stopping mid-iteration without cancelling ctx
-// will leak goroutines that are still blocked on the internal channel.
+// (completion order, not input order). Early termination (yield returning
+// false) and context cancellation are both safe: the internal channel is
+// buffered to len(items) so in-flight goroutines always have capacity to
+// write their result and exit without being drained by the caller.
 //
 // limit <= 0 means unbounded (one goroutine per item). A positive limit caps
 // the number of goroutines that may be running simultaneously via a buffered
