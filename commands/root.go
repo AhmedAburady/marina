@@ -25,8 +25,9 @@ func NewRootCmd(version string) *cobra.Command {
 	var gf GlobalFlags
 
 	root := &cobra.Command{
-		Use:   "marina",
-		Short: "Multi-host Docker management via SSH",
+		Use:     "marina",
+		Short:   "Multi-host Docker management via SSH",
+		Version: version, // surfaces on `marina -v` / `marina --version` via fang
 		Long: `Marina manages Docker containers across multiple homelab hosts over SSH.
 Zero setup required on target hosts — marina connects via native SSH.`,
 		SilenceUsage:  true,
@@ -48,6 +49,9 @@ Zero setup required on target hosts — marina connects via native SSH.`,
 			return tui.Run(cmd.Context(), cfg)
 		},
 	}
+	// Strip cobra's default "<name> version " prefix so `-v` / `--version`
+	// print just the raw version string (e.g. "dev", "v0.1.0").
+	root.SetVersionTemplate("{{.Version}}\n")
 
 	// -H (capital) avoids the Cobra -h / --help reservation.
 	root.PersistentFlags().StringVarP(&gf.Host, "host", "H", "", "Target host (name from config)")
