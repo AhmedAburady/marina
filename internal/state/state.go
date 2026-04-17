@@ -7,8 +7,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
+
+// saveMu guards the Load→modify→Save sequence in SaveHostSnapshot so that
+// single-host CLI callers (which do not go through FetchAllHosts' aggregation
+// path) cannot race with each other.
+var saveMu sync.Mutex
 
 // DefaultPath returns ~/.config/marina/state.json
 func DefaultPath() (string, error) {
@@ -76,7 +82,9 @@ func Load(path string) (*Store, error) {
 	return &store, nil
 }
 
-// Save writes the store to the state file.
+// Save writes the store to the state file atomically.
+// It writes to a temporary file in the same directory, syncs, closes, chmods,
+// then renames over the destination — POSIX-atomic and safe on Windows too.
 func Save(store *Store, path string) error {
 	if path == "" {
 		var err error
@@ -86,7 +94,8 @@ func Save(store *Store, path string) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
@@ -95,14 +104,49 @@ func Save(store *Store, path string) error {
 		return fmt.Errorf("marshal state: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write state %s: %w", path, err)
+	tmp, err := os.CreateTemp(dir, ".state-*.tmp.json")
+	if err != nil {
+		return fmt.Errorf("create temp state file: %w", err)
 	}
+	tmpName := tmp.Name()
+
+	// Ensure the temp file is removed if anything goes wrong after creation.
+	var writeOK bool
+	defer func() {
+		if !writeOK {
+			os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp state %s: %w", tmpName, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp state %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp state %s: %w", tmpName, err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return fmt.Errorf("chmod temp state %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp state to %s: %w", path, err)
+	}
+	writeOK = true
 	return nil
 }
 
 // SaveHostSnapshot updates the snapshot for a single host and persists.
+// It is guarded by a mutex so single-host callers are safe from concurrent
+// Load→modify→Save races. For bulk updates across many hosts, prefer the
+// aggregation pattern in FetchAllHosts (load once, merge all, save once).
 func SaveHostSnapshot(hostName string, snapshot *HostSnapshot, path string) error {
+	saveMu.Lock()
+	defer saveMu.Unlock()
+
 	store, err := Load(path)
 	if err != nil {
 		// Non-fatal — start fresh if state is corrupted.

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"runtime/debug"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -38,7 +40,19 @@ func (m *dashboard) Init() tea.Cmd {
 	return m.top().Init()
 }
 
-func (m *dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *dashboard) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
+	defer func() {
+		if r := recover(); r != nil {
+			Log().Error("tui.panic",
+				"msg_type", fmt.Sprintf("%T", msg),
+				"panic", r,
+				"stack", string(debug.Stack()),
+			)
+			model = m
+			cmd = nil
+		}
+	}()
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -71,7 +85,8 @@ func (m *dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// Delegate to the top screen. Screens may return (possibly a new screen
 	// instance) + a command; we always replace the top entry in place.
-	updated, cmd := m.top().Update(msg)
+	var updated Screen
+	updated, cmd = m.top().Update(msg)
 	m.stack[len(m.stack)-1] = updated
 	return m, cmd
 }

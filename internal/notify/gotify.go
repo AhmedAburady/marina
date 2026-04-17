@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -22,6 +24,20 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 		return fmt.Errorf("gotify not configured: url and token are required")
 	}
 
+	// Enforce HTTPS unless the target is a loopback address (local dev / test).
+	u, err := url.Parse(cfg.URL)
+	if err != nil {
+		return fmt.Errorf("gotify url is invalid: %w", err)
+	}
+	if u.Scheme != "https" {
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		isLoopback := host == "localhost" || (ip != nil && ip.IsLoopback())
+		if !isLoopback {
+			return fmt.Errorf("gotify url must use https (got %q); use https:// to protect your token in transit", cfg.URL)
+		}
+	}
+
 	payload := map[string]any{
 		"title":    title,
 		"message":  message,
@@ -33,8 +49,8 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 		return fmt.Errorf("marshal gotify payload: %w", err)
 	}
 
-	url := cfg.URL + "/message"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	endpoint := cfg.URL + "/message"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("create gotify request: %w", err)
 	}
@@ -42,7 +58,15 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Gotify-Key", cfg.Token)
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+				return fmt.Errorf("gotify redirect from https to %s refused: possible token exfiltration", req.URL.Scheme)
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send gotify notification: %w", err)

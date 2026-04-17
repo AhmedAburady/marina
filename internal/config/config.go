@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -109,10 +110,18 @@ func Load(path string) (*Config, error) {
 	if cfg.Hosts == nil {
 		cfg.Hosts = make(map[string]*HostConfig)
 	}
+
+	// Expand tilde and environment variables in SSH key paths so that the
+	// config example (ssh_key: ~/.ssh/id_ed25519) works out of the box.
+	cfg.Settings.SSHKey = expandPath(cfg.Settings.SSHKey)
+	for _, h := range cfg.Hosts {
+		h.SSHKey = expandPath(h.SSHKey)
+	}
+
 	return &cfg, nil
 }
 
-// Save writes cfg to path. If path is empty, DefaultPath is used.
+// Save writes cfg to path atomically. If path is empty, DefaultPath is used.
 // Parent directories are created as needed.
 func Save(cfg *Config, path string) error {
 	if path == "" {
@@ -123,7 +132,8 @@ func Save(cfg *Config, path string) error {
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
@@ -132,10 +142,59 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write config %s: %w", path, err)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp.yaml")
+	if err != nil {
+		return fmt.Errorf("create temp config file: %w", err)
 	}
+	tmpName := tmp.Name()
+
+	var writeOK bool
+	defer func() {
+		if !writeOK {
+			os.Remove(tmpName)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp config %s: %w", tmpName, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp config %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp config %s: %w", tmpName, err)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return fmt.Errorf("chmod temp config %s: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp config to %s: %w", path, err)
+	}
+	writeOK = true
 	return nil
+}
+
+// expandPath expands environment variables and a leading tilde in p.
+// Returns p unchanged if p is empty. The tilde is resolved via
+// os.UserHomeDir so it works even when $HOME is unset.
+func expandPath(p string) string {
+	if p == "" {
+		return p
+	}
+	p = os.ExpandEnv(p)
+	if strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	} else if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = home
+		}
+	}
+	return p
 }
 
 // Validate checks the config for obvious errors.

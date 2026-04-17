@@ -7,9 +7,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,19 +47,17 @@ func parseAddress(address string) (user, host string, port int) {
 		addr = addr[at+1:]
 	}
 
-	// addr is now "host" or "host:port".
-	// Use net.SplitHostPort if there's a colon that looks like a port.
-	if strings.Contains(addr, ":") {
-		h, p, err := net.SplitHostPort(addr)
-		if err == nil {
-			n, err := strconv.Atoi(p)
-			if err == nil {
-				return user, h, n
-			}
+	// addr is now "host", "host:port", "[::1]", or "[::1]:port".
+	// net.SplitHostPort handles all bracketed IPv6 forms and plain host:port.
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		if n, err := strconv.Atoi(p); err == nil {
+			return user, h, n
 		}
 	}
 
-	host = addr
+	// No port component — strip any brackets that denote a bare IPv6 address
+	// (e.g. "[::1]" → "::1") and default port to 22.
+	host = strings.Trim(addr, "[]")
 	return
 }
 
@@ -107,6 +107,20 @@ func newClientConfig(cfg Config) (*ssh.ClientConfig, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read SSH key %s: %w", cfg.KeyPath, err)
 		}
+		// Guard against world- or group-readable key files (OpenSSH refuses them).
+		// Skip on Windows, which uses ACLs rather than Unix permission bits.
+		if runtime.GOOS != "windows" {
+			info, err := os.Stat(cfg.KeyPath)
+			if err != nil {
+				return nil, fmt.Errorf("stat SSH key %s: %w", cfg.KeyPath, err)
+			}
+			if perm := info.Mode().Perm(); perm&0o077 != 0 {
+				return nil, fmt.Errorf(
+					"ssh key %s has permissions %o; run chmod 600 %s",
+					cfg.KeyPath, perm, cfg.KeyPath,
+				)
+			}
+		}
 		signer, err := ssh.ParsePrivateKey(keyBytes)
 		if err != nil {
 			return nil, fmt.Errorf("parse SSH key %s: %w", cfg.KeyPath, err)
@@ -121,6 +135,14 @@ func newClientConfig(cfg Config) (*ssh.ClientConfig, error) {
 	}
 
 	user, _, _ := parseAddress(cfg.Address)
+
+	// Log which auth methods will be attempted. x/crypto/ssh's AuthLogCallback
+	// is server-side only; on the client we log at construction time.
+	// Method names: "publickey" (agent or key file).
+	slog.Debug("ssh auth methods configured",
+		"host", cfg.Address,
+		"method_count", len(authMethods),
+	)
 
 	clientCfg := &ssh.ClientConfig{
 		User:            user,
@@ -153,7 +175,7 @@ func dial(ctx context.Context, cfg Config) (*ssh.Client, error) {
 	sshConn, chans, reqs, err := ssh.NewClientConn(tcpConn, addr, clientCfg)
 	if err != nil {
 		tcpConn.Close()
-		return nil, fmt.Errorf("SSH handshake %s: %w", addr, err)
+		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
 
 	return ssh.NewClient(sshConn, chans, reqs), nil

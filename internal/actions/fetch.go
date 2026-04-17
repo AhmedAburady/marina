@@ -3,6 +3,7 @@ package actions
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -63,12 +64,53 @@ func FetchAllHosts(
 	for r := range ch {
 		results[r.Host] = r
 	}
+
+	// Persist all live-success snapshots in one atomic write: Load once, merge
+	// every live result, Save once. This eliminates the concurrent
+	// Load→modify→Save races that occurred when each goroutine called
+	// SaveHostSnapshot independently.
+	persistSnapshots(results)
+
 	return results
+}
+
+// persistSnapshots merges live-fetch results into the state cache in a single
+// Load→merge→Save cycle, avoiding concurrent write races.
+func persistSnapshots(results map[string]HostFetchResult) {
+	// Collect only live-success results — do not overwrite cached entries and
+	// do not clear existing snapshots for failed hosts.
+	var live []HostFetchResult
+	for _, r := range results {
+		if r.Err == nil && !r.FromCache {
+			live = append(live, r)
+		}
+	}
+	if len(live) == 0 {
+		return
+	}
+
+	store, err := state.Load("")
+	if err != nil {
+		store = &state.Store{Hosts: make(map[string]*state.HostSnapshot)}
+	}
+	now := time.Now()
+	for _, r := range live {
+		store.Hosts[r.Host] = &state.HostSnapshot{
+			Containers: toStateContainers(r.Containers),
+			UpdatedAt:  now,
+		}
+	}
+	_ = state.Save(store, "")
 }
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
 func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchResult {
+	start := time.Now()
+	defer func() {
+		slog.Debug("fetch.host", "host", host, "elapsed", time.Since(start))
+	}()
+
 	containers, err := fetchLive(ctx, address, sshKey)
 	if err != nil {
 		if cached, cachedAt, ok := loadCachedContainers(host); ok {
@@ -76,9 +118,8 @@ func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchRe
 		}
 		return HostFetchResult{Host: host, Err: err}
 	}
-	_ = state.SaveHostSnapshot(host, &state.HostSnapshot{
-		Containers: toStateContainers(containers),
-	}, "")
+	// Persistence is handled by FetchAllHosts via persistSnapshots after all
+	// goroutines complete — do not call SaveHostSnapshot here.
 	return HostFetchResult{Host: host, Containers: containers}
 }
 

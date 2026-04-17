@@ -28,9 +28,12 @@ func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client,
 	sshFlags := []string{
 		"-o", "ServerAliveInterval=15",
 		"-o", "ServerAliveCountMax=3",
+		"-o", "StrictHostKeyChecking=yes",
+		"-o", "UserKnownHostsFile=~/.ssh/known_hosts",
+		"-o", "BatchMode=yes",
 	}
 	if sshKeyPath != "" {
-		sshFlags = append(sshFlags, "-i", sshKeyPath)
+		sshFlags = append(sshFlags, "-i", sshKeyPath, "-o", "IdentitiesOnly=yes")
 	}
 
 	helper, err := connhelper.GetConnectionHelperWithSSHOpts(address, sshFlags)
