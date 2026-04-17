@@ -2,10 +2,12 @@ package commands
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 
@@ -104,25 +106,15 @@ func runCheckCmd(cmd *cobra.Command, gf *GlobalFlags, notify bool) error {
 
 	// Group rows by host so we can render one bordered table per host —
 	// matches the visual cadence of `marina ps` / `marina stacks`.
-	sort.Slice(results, func(i, j int) bool {
-		if results[i].Host != results[j].Host {
-			return results[i].Host < results[j].Host
-		}
-		if results[i].Stack != results[j].Stack {
-			return results[i].Stack < results[j].Stack
-		}
-		return results[i].Container < results[j].Container
+	slices.SortFunc(results, func(a, b registry.Result) int {
+		return cmp.Or(cmp.Compare(a.Host, b.Host), cmp.Compare(a.Stack, b.Stack), cmp.Compare(a.Container, b.Container))
 	})
 
 	byHost := make(map[string][]registry.Result)
 	for _, r := range results {
 		byHost[r.Host] = append(byHost[r.Host], r)
 	}
-	hosts := make([]string, 0, len(byHost))
-	for h := range byHost {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
+	hosts := slices.Sorted(maps.Keys(byHost))
 
 	w := cmd.OutOrStdout()
 	for _, h := range hosts {
@@ -188,11 +180,8 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 		// from past updates get swept up.
 	}
 
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].Host != keys[j].Host {
-			return keys[i].Host < keys[j].Host
-		}
-		return keys[i].Stack < keys[j].Stack
+	slices.SortFunc(keys, func(a, b stackKey) int {
+		return cmp.Or(cmp.Compare(a.Host, b.Host), cmp.Compare(a.Stack, b.Stack))
 	})
 
 	// Interactive confirmation when --yes is not passed and there are updates
@@ -290,11 +279,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 	// landed, so dangling images left over from earlier runs still get
 	// swept up on a no-op cycle. Same parallelism rules as the apply loop.
 	if cfg.Settings.PruneAfterUpdate {
-		pruneHosts := make([]string, 0, len(targets))
-		for host := range targets {
-			pruneHosts = append(pruneHosts, host)
-		}
-		sort.Strings(pruneHosts)
+		pruneHosts := slices.Sorted(maps.Keys(targets))
 
 		if len(pruneHosts) == 1 {
 			if err := runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0], stream); err != nil {
@@ -512,6 +497,7 @@ func sendNotifySummary(cmd *cobra.Command, cfg *config.Config, results []registr
 	gotifyCfg := notifyPkg.GotifyConfig{
 		URL:      cfg.Notify.Gotify.URL,
 		Token:    cfg.Notify.Gotify.Token,
+		TokenEnv: cfg.Notify.Gotify.TokenEnv,
 		Priority: cfg.Notify.Gotify.Priority,
 	}
 

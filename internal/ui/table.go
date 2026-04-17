@@ -2,10 +2,11 @@
 package ui
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -84,13 +85,10 @@ func hostHeader(host string) string {
 // default. Same palette the TUI containers screen uses.
 func PrintContainerTable(w io.Writer, host string, containers []container.Summary) {
 	// Sort containers by stack name, then by container name within each stack.
-	sort.Slice(containers, func(i, j int) bool {
-		si := containers[i].Labels["com.docker.compose.project"]
-		sj := containers[j].Labels["com.docker.compose.project"]
-		if si != sj {
-			return si < sj
-		}
-		return ContainerName(containers[i]) < ContainerName(containers[j])
+	slices.SortFunc(containers, func(a, b container.Summary) int {
+		sa := a.Labels["com.docker.compose.project"]
+		sb := b.Labels["com.docker.compose.project"]
+		return cmp.Or(cmp.Compare(sa, sb), cmp.Compare(ContainerName(a), ContainerName(b)))
 	})
 
 	fmt.Fprintln(w, hostHeader(host))

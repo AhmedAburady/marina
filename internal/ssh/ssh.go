@@ -88,16 +88,15 @@ func newClientConfig(cfg Config) (*ssh.ClientConfig, error) {
 	var authMethods []ssh.AuthMethod
 
 	// 1. SSH agent (best option when available, but only if it has keys).
-	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		agentConn, err := net.Dial("unix", sock)
-		if err == nil {
-			agentClient := agent.NewClient(agentConn)
-			// Only use agent auth if it actually has keys loaded.
-			if keys, err := agentClient.List(); err == nil && len(keys) > 0 {
-				authMethods = append(authMethods, ssh.PublicKeysCallback(agentClient.Signers))
-			} else {
-				agentConn.Close()
-			}
+	// dialSSHAgent is platform-specific: unix socket on Linux/macOS, named pipe
+	// on Windows.
+	if agentConn, err := dialSSHAgent(); err == nil && agentConn != nil {
+		agentClient := agent.NewClient(agentConn)
+		// Only use agent auth if it actually has keys loaded.
+		if keys, err := agentClient.List(); err == nil && len(keys) > 0 {
+			authMethods = append(authMethods, ssh.PublicKeysCallback(agentClient.Signers))
+		} else {
+			agentConn.Close()
 		}
 	}
 
@@ -153,9 +152,21 @@ func newClientConfig(cfg Config) (*ssh.ClientConfig, error) {
 	return clientCfg, nil
 }
 
-// dial establishes an SSH connection to the host described by cfg.
-// It honours ctx for the TCP dial phase via net.Dialer.DialContext, giving
-// callers real cancellation rather than relying solely on the connect timeout.
+const (
+	keepaliveInterval    = 15 * time.Second
+	keepaliveMaxFailures = 3
+)
+
+// dial establishes an SSH connection to the host described by cfg and starts a
+// background keepalive goroutine to detect NAT half-open connections.
+//
+// The keepalive goroutine sends "keepalive@openssh.com" every 15 s and closes
+// the client after 3 consecutive failures. Note: if the TCP connection is
+// silently dropped (NAT black-hole), SendRequest will block until the OS TCP
+// timeout fires before returning an error — detection therefore takes up to
+// 1×OS-TCP-timeout, not 3×15 s. Cancelling ctx via closeOnce will unblock it.
+//
+// The returned *ssh.Client must be closed by the caller (or context cancel).
 func dial(ctx context.Context, cfg Config) (*ssh.Client, error) {
 	_, host, port := parseAddress(cfg.Address)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
@@ -178,7 +189,48 @@ func dial(ctx context.Context, cfg Config) (*ssh.Client, error) {
 		return nil, fmt.Errorf("ssh handshake %s: %w", addr, err)
 	}
 
-	return ssh.NewClient(sshConn, chans, reqs), nil
+	client := ssh.NewClient(sshConn, chans, reqs)
+
+	// closeOnce ensures client.Close is safe to call from multiple goroutines
+	// (keepalive + ctx watcher).
+	var closeOnce sync.Once
+	closeClient := func() { closeOnce.Do(func() { client.Close() }) }
+
+	// Keepalive goroutine: detect NAT half-open connections and close the
+	// client so blocked sessions/commands surface an error rather than hanging.
+	go func() {
+		ticker := time.NewTicker(keepaliveInterval)
+		defer ticker.Stop()
+		failures := 0
+		for {
+			select {
+			case <-ticker.C:
+				_, _, err := client.SendRequest("keepalive@openssh.com", true, nil)
+				if err != nil {
+					failures++
+					slog.Debug("ssh keepalive failure",
+						"host", cfg.Address,
+						"consecutive_failures", failures,
+					)
+					if failures >= keepaliveMaxFailures {
+						slog.Warn("ssh keepalive: closing connection after repeated failures",
+							"host", cfg.Address,
+						)
+						closeClient()
+						return
+					}
+				} else {
+					failures = 0
+				}
+			case <-ctx.Done():
+				// Context cancelled — stop the keepalive goroutine. The caller
+				// goroutine (in Exec/Stream) is responsible for closing the client.
+				return
+			}
+		}
+	}()
+
+	return client, nil
 }
 
 // Exec runs command on the remote host and returns the combined stdout+stderr
@@ -190,14 +242,15 @@ func Exec(ctx context.Context, cfg Config, command string) (string, error) {
 	}
 	defer client.Close()
 
-	// Watch for context cancellation and close the client to unblock the session.
-	cancelOnce := &sync.Once{}
-	cancelFunc := func() { cancelOnce.Do(func() { client.Close() }) }
+	// done is closed by defer when Exec returns, which signals the cancel
+	// goroutine to exit so it doesn't outlive the client.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			cancelFunc()
-		case <-clientDone(client):
+			client.Close()
+		case <-done:
 		}
 	}()
 
@@ -228,15 +281,15 @@ func Stream(ctx context.Context, cfg Config, command string, stdout, stderr io.W
 	}
 	defer client.Close()
 
-	// Cancel goroutine: close the client when ctx fires so session.Wait()
-	// unblocks even if the remote command is still running.
-	cancelOnce := &sync.Once{}
-	cancelFunc := func() { cancelOnce.Do(func() { client.Close() }) }
+	// done is closed by defer when Stream returns, which signals the cancel
+	// goroutine to exit so it doesn't outlive the client.
+	done := make(chan struct{})
+	defer close(done)
 	go func() {
 		select {
 		case <-ctx.Done():
-			cancelFunc()
-		case <-clientDone(client):
+			client.Close()
+		case <-done:
 		}
 	}()
 
@@ -260,17 +313,4 @@ func Stream(ctx context.Context, cfg Config, command string, stdout, stderr io.W
 		return fmt.Errorf("ssh stream %q: %w", command, err)
 	}
 	return nil
-}
-
-// clientDone returns a channel that closes when the SSH client's underlying
-// connection is closed. We use it to release the context-watcher goroutine so
-// it doesn't leak after the command finishes normally.
-func clientDone(c *ssh.Client) <-chan struct{} {
-	ch := make(chan struct{})
-	go func() {
-		// Wait() on the ssh.Client blocks until the transport closes.
-		c.Wait() //nolint:errcheck
-		close(ch)
-	}()
-	return ch
 }

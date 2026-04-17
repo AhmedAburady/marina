@@ -119,5 +119,3 @@ func SequenceCmds(cmds ...tea.Cmd) tea.Cmd {
 	}
 }
 
-// Silence unused-import guard when future callers route through actions.
-var _ = internalssh.Config{}

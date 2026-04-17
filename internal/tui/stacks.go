@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 	"image/color"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -358,11 +359,7 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 	// discovery.GroupByStack returns (running stacks first, stopped last).
 	// A top-level sort by name would break that invariant and we'd lose
 	// CLI parity — stopped stacks would interleave with running ones.
-	hosts := make([]string, 0, len(results))
-	for h := range results {
-		hosts = append(hosts, h)
-	}
-	sort.Strings(hosts)
+	hosts := slices.Sorted(maps.Keys(results))
 
 	var out []stackRow
 	for _, host := range hosts {

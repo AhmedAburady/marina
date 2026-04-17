@@ -21,13 +21,20 @@ type dashboard struct {
 	stack  []Screen
 	width  int
 	height int
+
+	// progressBar and progressPct cache the last-allocated progress bar so
+	// we don't allocate a new *ProgressBar on every rendered frame. -1 means
+	// no bar has been allocated yet.
+	progressBar *tea.ProgressBar
+	progressPct int
 }
 
 func newDashboard(ctx context.Context, cfg *config.Config) *dashboard {
 	return &dashboard{
-		ctx:   ctx,
-		cfg:   cfg,
-		stack: []Screen{newHomeScreen(ctx, cfg)},
+		ctx:         ctx,
+		cfg:         cfg,
+		stack:       []Screen{newHomeScreen(ctx, cfg)},
+		progressPct: -1,
 	}
 }
 
@@ -134,7 +141,11 @@ func (m *dashboard) View() tea.View {
 			} else if pct > 100 {
 				pct = 100
 			}
-			v.ProgressBar = tea.NewProgressBar(tea.ProgressBarDefault, pct)
+			if m.progressPct != pct || m.progressBar == nil {
+				m.progressBar = tea.NewProgressBar(tea.ProgressBarDefault, pct)
+				m.progressPct = pct
+			}
+			v.ProgressBar = m.progressBar
 		}
 	}
 	return v

@@ -18,5 +18,7 @@ settings:
 notifications:
   gotify:
     url: https://gotify.yourdomain.com
-    token: your-app-token
+    # prefer token_env over token (keeps secret out of config file)
+    # token_env: MARINA_GOTIFY_TOKEN   # read token from this env var
+    token: your-app-token              # stored in plaintext — keep this file 0600
     priority: 5

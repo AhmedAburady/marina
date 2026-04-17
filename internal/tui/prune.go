@@ -3,8 +3,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"maps"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/spinner"
@@ -137,11 +138,7 @@ func newPruneScreen(ctx context.Context, cfg *config.Config) *pruneScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 
-	names := make([]string, 0, len(cfg.Hosts))
-	for n := range cfg.Hosts {
-		names = append(names, n)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(cfg.Hosts))
 
 	// Default: every host selected. Matches --all in the CLI and keeps the
 	// common "clean everything" flow to one keystroke.

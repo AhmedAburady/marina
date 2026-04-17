@@ -1,10 +1,11 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"image/color"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -366,14 +367,8 @@ func (s *containersScreen) buildRows(results map[string]HostFetchResult) {
 			})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].host != out[j].host {
-			return out[i].host < out[j].host
-		}
-		if out[i].stack != out[j].stack {
-			return out[i].stack < out[j].stack
-		}
-		return out[i].name < out[j].name
+	slices.SortFunc(out, func(a, b containerRow) int {
+		return cmp.Or(cmp.Compare(a.host, b.host), cmp.Compare(a.stack, b.stack), cmp.Compare(a.name, b.name))
 	})
 	s.rows = out
 	s.rebuildVisible()

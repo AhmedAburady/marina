@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/AhmedAburady/marina/internal/config"
 )
 
 // saveMu guards the Load→modify→Save sequence in SaveHostSnapshot so that
@@ -16,13 +18,17 @@ import (
 // path) cannot race with each other.
 var saveMu sync.Mutex
 
-// DefaultPath returns ~/.config/marina/state.json
+// DefaultPath returns the state file path inside the marina config directory.
+// On macOS this is ~/Library/Application Support/marina/state.json,
+// on Linux it honours XDG_CONFIG_HOME, on Windows %AppData%\marina\state.json.
+// A one-release read fallback applies: if the canonical dir is absent but
+// ~/.config/marina/ exists, the legacy path is returned (and a warning logged).
 func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := config.ResolveConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", fmt.Errorf("resolve config dir: %w", err)
 	}
-	return filepath.Join(home, ".config", "marina", "state.json"), nil
+	return filepath.Join(dir, "state.json"), nil
 }
 
 // HostSnapshot holds the last-known container state for a single host.
@@ -85,13 +91,14 @@ func Load(path string) (*Store, error) {
 // Save writes the store to the state file atomically.
 // It writes to a temporary file in the same directory, syncs, closes, chmods,
 // then renames over the destination — POSIX-atomic and safe on Windows too.
+// When path is empty, Save always writes to the canonical (new) location.
 func Save(store *Store, path string) error {
 	if path == "" {
-		var err error
-		path, err = DefaultPath()
+		dir, err := config.ResolveConfigDirForWrite()
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve config dir: %w", err)
 		}
+		path = filepath.Join(dir, "state.json")
 	}
 
 	dir := filepath.Dir(path)

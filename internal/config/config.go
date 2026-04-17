@@ -70,18 +70,29 @@ type NotifyConfig struct {
 
 // GotifyConfig holds Gotify push notification settings.
 type GotifyConfig struct {
-	URL      string `yaml:"url"`
-	Token    string `yaml:"token"`
+	URL string `yaml:"url"`
+	// Token is the Gotify app token in plaintext. Prefer TokenEnv to keep the
+	// secret out of the config file (see token_env). Keep config.yaml at 0600.
+	Token string `yaml:"token"`
+	// TokenEnv names an environment variable that holds the Gotify app token.
+	// When set and Token is empty, the token is read from os.Getenv(TokenEnv).
+	// Example: token_env: MARINA_GOTIFY_TOKEN
+	TokenEnv string `yaml:"token_env,omitempty"`
 	Priority int    `yaml:"priority"`
 }
 
-// DefaultPath returns the default config file path: ~/.config/marina/config.yaml
+// DefaultPath returns the default config file path.
+// On macOS this is ~/Library/Application Support/marina/config.yaml,
+// on Linux it honours XDG_CONFIG_HOME (defaulting to ~/.config/marina/),
+// and on Windows it uses %AppData%\marina\config.yaml.
+// A one-release read fallback returns the legacy ~/.config/marina/ path
+// when the canonical directory does not yet exist but the legacy one does.
 func DefaultPath() (string, error) {
-	home, err := os.UserHomeDir()
+	dir, err := ResolveConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", fmt.Errorf("resolve config dir: %w", err)
 	}
-	return filepath.Join(home, ".config", "marina", "config.yaml"), nil
+	return filepath.Join(dir, "config.yaml"), nil
 }
 
 // Load reads the config file at path. If path is empty, DefaultPath is used.
@@ -121,15 +132,16 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes cfg to path atomically. If path is empty, DefaultPath is used.
+// Save writes cfg to path atomically. If path is empty, the canonical config
+// path is used (writes always go to the canonical location, never legacy).
 // Parent directories are created as needed.
 func Save(cfg *Config, path string) error {
 	if path == "" {
-		var err error
-		path, err = DefaultPath()
+		dir, err := ResolveConfigDirForWrite()
 		if err != nil {
-			return err
+			return fmt.Errorf("resolve config dir: %w", err)
 		}
+		path = filepath.Join(dir, "config.yaml")
 	}
 
 	dir := filepath.Dir(path)

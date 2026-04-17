@@ -1,9 +1,10 @@
 package actions
 
 import (
+	"cmp"
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -32,7 +33,7 @@ func ListHosts(cfg *config.Config) []HostRow {
 			Key:     resolvedKey(h, cfg),
 		})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	slices.SortFunc(out, func(a, b HostRow) int { return cmp.Compare(a.Name, b.Name) })
 	return out
 }
 

@@ -35,7 +35,12 @@ func TestFetchAllHosts_EmptyTargets(t *testing.T) {
 	}
 
 	// No state file should have been created for a zero-host call.
-	stateFile := filepath.Join(tmp, ".config", "marina", "state.json")
+	// Use state.DefaultPath() so the expected path honours os.UserConfigDir()
+	// (XDG on Linux, ~/Library/Application Support on macOS, etc.).
+	stateFile, err := state.DefaultPath()
+	if err != nil {
+		t.Fatalf("state.DefaultPath: %v", err)
+	}
 	if _, err := os.Stat(stateFile); err == nil {
 		t.Error("state.json was created for a zero-host call, want no write")
 	}
@@ -85,7 +90,11 @@ func TestPersistSnapshots_LiveOnlyPersisted(t *testing.T) {
 	persistSnapshots(results)
 
 	// State should exist only for live-host.
-	statePath := filepath.Join(tmp, ".config", "marina", "state.json")
+	// Derive the path dynamically to honour os.UserConfigDir().
+	statePath, err := state.DefaultPath()
+	if err != nil {
+		t.Fatalf("state.DefaultPath: %v", err)
+	}
 	store, err := state.Load(statePath)
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
@@ -134,7 +143,10 @@ func TestPersistSnapshots_MergePreservesExisting(t *testing.T) {
 		},
 	})
 
-	statePath := filepath.Join(tmp, ".config", "marina", "state.json")
+	statePath, err := state.DefaultPath()
+	if err != nil {
+		t.Fatalf("state.DefaultPath: %v", err)
+	}
 	store, err := state.Load(statePath)
 	if err != nil {
 		t.Fatalf("state.Load: %v", err)
@@ -159,7 +171,10 @@ func TestPersistSnapshots_NoLiveResults_NoWrite(t *testing.T) {
 	}
 	persistSnapshots(results)
 
-	stateFile := filepath.Join(tmp, ".config", "marina", "state.json")
+	stateFile, err := state.DefaultPath()
+	if err != nil {
+		t.Fatalf("state.DefaultPath: %v", err)
+	}
 	if _, err := os.Stat(stateFile); err == nil {
 		t.Error("state.json written even though no live results existed")
 	}
@@ -188,7 +203,10 @@ func TestPersistSnapshots_SaveToNonWritableDir(t *testing.T) {
 	})
 
 	// Lock the marina config dir so future writes fail.
-	configDir := filepath.Join(tmp, ".config", "marina")
+	configDir, err := config.ResolveConfigDirForWrite()
+	if err != nil {
+		t.Fatalf("config.ResolveConfigDirForWrite: %v", err)
+	}
 	if err := os.Chmod(configDir, 0o555); err != nil {
 		t.Skipf("chmod non-writable not supported on this platform: %v", err)
 	}

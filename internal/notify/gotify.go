@@ -8,19 +8,34 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
 // GotifyConfig holds Gotify connection settings.
 type GotifyConfig struct {
-	URL      string
-	Token    string
+	URL string
+	// Token is the Gotify app token in plaintext.
+	// Prefer TokenEnv to keep the secret out of config files.
+	Token string
+	// TokenEnv names an environment variable holding the Gotify app token.
+	// When set and Token is empty, the token is read from os.Getenv(TokenEnv).
+	TokenEnv string
 	Priority int
 }
 
 // SendGotify posts a push notification to a Gotify server.
 func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) error {
-	if cfg.URL == "" || cfg.Token == "" {
+	// Resolve token: plaintext wins; fall back to env var.
+	token := cfg.Token
+	if token == "" && cfg.TokenEnv != "" {
+		token = os.Getenv(cfg.TokenEnv)
+		if token == "" {
+			return fmt.Errorf("gotify not configured: token_env %q is set but the environment variable is empty", cfg.TokenEnv)
+		}
+	}
+
+	if cfg.URL == "" || token == "" {
 		return fmt.Errorf("gotify not configured: url and token are required")
 	}
 
@@ -56,7 +71,7 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Gotify-Key", cfg.Token)
+	req.Header.Set("X-Gotify-Key", token)
 
 	client := &http.Client{
 		Timeout: 10 * time.Second,
