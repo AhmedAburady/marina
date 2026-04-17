@@ -213,7 +213,7 @@ func dial(ctx context.Context, cfg Config) (*ssh.Client, error) {
 						"consecutive_failures", failures,
 					)
 					if failures >= keepaliveMaxFailures {
-						slog.Warn("ssh keepalive: closing connection after repeated failures",
+						slog.Debug("ssh keepalive: closing connection after repeated failures",
 							"host", cfg.Address,
 						)
 						closeClient()
