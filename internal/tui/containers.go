@@ -324,7 +324,7 @@ func (s *containersScreen) buildRemoveCmd(r containerRow) func() tea.Cmd {
 		s.pending[r.id] = true
 		delete(s.errors, r.id)
 		return tea.Batch(
-			DockerExecCmd(r.sshCfg, "docker rm -f "+r.id, "container.remove", r.id),
+			DockerExecCmd(s.ctx, r.sshCfg, "docker rm -f "+r.id, "container.remove", r.id),
 			s.spinner.Tick,
 		)
 	}
@@ -414,7 +414,7 @@ func (s *containersScreen) runAction(dockerCmd, kind string) tea.Cmd {
 	s.pending[r.id] = true
 	delete(s.errors, r.id)
 	return tea.Batch(
-		DockerExecCmd(r.sshCfg, dockerCmd+" "+r.id, kind, r.id),
+		DockerExecCmd(s.ctx, r.sshCfg, dockerCmd+" "+r.id, kind, r.id),
 		s.spinner.Tick,
 	)
 }

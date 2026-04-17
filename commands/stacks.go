@@ -96,27 +96,9 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 		return nil
 	}
 
-	// Resolve target host map.
-	targets := cfg.Hosts
-	if gf.Host != "" {
-		h, ok := cfg.Hosts[gf.Host]
-		if !ok {
-			return fmt.Errorf("host %q not found in config", gf.Host)
-		}
-		targets = map[string]*config.HostConfig{gf.Host: h}
-	} else if !gf.All {
-		hostNames := make([]string, 0, len(cfg.Hosts))
-		for name := range cfg.Hosts {
-			hostNames = append(hostNames, name)
-		}
-		sort.Strings(hostNames)
-		selected, err := ui.SelectHost(hostNames)
-		if err != nil {
-			return err
-		}
-		if selected != "" {
-			targets = map[string]*config.HostConfig{selected: cfg.Hosts[selected]}
-		}
+	targets, err := resolveTargets(gf, cfg)
+	if err != nil {
+		return err
 	}
 
 	// Single shared fan-out. Cache-fallback handled inside actions.

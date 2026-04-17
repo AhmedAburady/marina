@@ -399,6 +399,10 @@ func (s *updatesScreen) buildCheckerCmd() tea.Cmd {
 	}
 }
 
+// Note: actions.RunChecks is the CLI/cron entry point for checks with
+// errgroup concurrency limiting. The TUI retains its per-candidate fan-out
+// (buildCheckerCmd → checkOneCmd) to preserve the real-time progress bar.
+
 func (s *updatesScreen) checkOneCmd(c registry.Candidate) tea.Cmd {
 	return func() tea.Msg {
 		r := s.check(s.ctx, c)
@@ -578,8 +582,8 @@ func (s *updatesScreen) startApply() tea.Cmd {
 		}
 		key := k.host + "/" + k.stack
 		cmds = append(cmds, SequenceCmds(
-			ComposeExecCmd(sshCfg, dir, "pull", "compose.pull", key),
-			ComposeExecCmd(sshCfg, dir, "up -d", "compose.up", key),
+			ComposeExecCmd(s.ctx, sshCfg, dir, "pull", "compose.pull", key),
+			ComposeExecCmd(s.ctx, sshCfg, dir, "up -d", "compose.up", key),
 		))
 	}
 	cmds = append(cmds, s.spinner.Tick)
@@ -617,7 +621,7 @@ func (s *updatesScreen) startPostApplyPrune() tea.Cmd {
 			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
 		}
 		cmds = append(cmds, SequenceCmds(
-			DockerExecCmd(sshCfg, "docker image prune -f", "image.prune", host),
+			DockerExecCmd(s.ctx, sshCfg, "docker image prune -f", "image.prune", host),
 		))
 	}
 	cmds = append(cmds, s.spinner.Tick)

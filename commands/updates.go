@@ -1,6 +1,7 @@
 package commands
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"charm.land/huh/v2"
 	"charm.land/huh/v2/spinner"
 	"charm.land/lipgloss/v2"
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	notifyPkg "github.com/AhmedAburady/marina/internal/notify"
 	"github.com/AhmedAburady/marina/internal/registry"
@@ -72,7 +74,7 @@ func runCheckCmd(cmd *cobra.Command, gf *GlobalFlags, notify bool) error {
 		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
-	targets, err := resolveTargets(cfg, gf)
+	targets, err := resolveTargets(gf, cfg)
 	if err != nil {
 		return err
 	}
@@ -142,7 +144,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
 		return nil
 	}
-	targets, err := resolveTargets(cfg, gf)
+	targets, err := resolveTargets(gf, cfg)
 	if err != nil {
 		return err
 	}
@@ -318,6 +320,8 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 }
 
 // runStackUpdate is the single-host path: spinner or streaming per --stream.
+// Delegates to actions.ApplyStackUpdate for two-step pull+up semantics that
+// match the TUI's SequenceCmds(pull, up) flow.
 func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string, stream bool) {
 	hostCfg := cfg.Hosts[k.Host]
 	sshCfg := internalssh.Config{
@@ -335,27 +339,43 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 		dir = resolved
 	}
 
-	command := fmt.Sprintf("cd %s && docker compose pull && docker compose up -d", dir)
 	title := fmt.Sprintf("Updating stack %q on %q...", k.Stack, k.Host)
 	doneMsg := fmt.Sprintf("Updated stack %q on %q.", k.Stack, k.Host)
 
 	if stream {
 		fmt.Fprintf(w, "\n── %s ──\n", title)
-		if err := internalssh.Stream(ctx, sshCfg, command, w, ew); err != nil {
+		if err := actions.ApplyStackUpdate(ctx, sshCfg, dir, w); err != nil {
 			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
 			return
 		}
 		fmt.Fprintln(w, doneMsg)
 	} else {
-		if err := execWithSpinner(ctx, w, hc, title, command, doneMsg); err != nil {
-			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
+		var buf bytes.Buffer
+		var applyErr error
+		spinErr := spinner.New().
+			Type(spinner.MiniDot).
+			Title(title).
+			Action(func() { applyErr = actions.ApplyStackUpdate(ctx, sshCfg, dir, &buf) }).
+			Run()
+		if spinErr != nil {
+			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, spinErr)
+			return
 		}
+		if applyErr != nil {
+			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, applyErr)
+			return
+		}
+		fmt.Fprintln(w)
+		if buf.Len() > 0 {
+			fmt.Fprint(w, buf.String())
+		}
+		fmt.Fprintln(w, doneMsg)
 	}
 }
 
 // runStackUpdateQuiet is the multi-host goroutine worker: no spinner (they
-// don't compose) and no streaming — returns an error that the caller
-// reports through the shared status line mutex.
+// don't compose) and no streaming — returns an error the caller reports via
+// the shared status-line mutex. Delegates to actions.ApplyStackUpdate.
 func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, dir string) error {
 	hostCfg := cfg.Hosts[k.Host]
 	sshCfg := internalssh.Config{
@@ -370,31 +390,46 @@ func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, di
 		}
 		dir = resolved
 	}
-	_, err := internalssh.Exec(ctx, sshCfg, fmt.Sprintf("cd %s && docker compose pull && docker compose up -d", dir))
-	return err
+	return actions.ApplyStackUpdate(ctx, sshCfg, dir, io.Discard)
 }
 
 // runHostPrune / runHostPruneQuiet mirror the stack helpers for the
-// post-apply image prune pass.
+// post-apply image prune pass. Delegate to actions.PruneHost.
 func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string, stream bool) {
 	hostCfg := cfg.Hosts[host]
 	sshCfg := internalssh.Config{
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
 		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
 	}
-	hc := &hostContext{cfg: cfg, host: hostCfg, name: host, sshCfg: sshCfg}
 	title := fmt.Sprintf("Pruning old images on %q...", host)
 	doneMsg := fmt.Sprintf("Pruned old images on %q.", host)
 	if stream {
 		fmt.Fprintf(w, "\n── %s ──\n", title)
-		if err := internalssh.Stream(ctx, sshCfg, "docker image prune -f", w, ew); err != nil {
+		if err := actions.PruneHost(ctx, sshCfg, w); err != nil {
 			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
 		}
 		fmt.Fprintln(w, doneMsg)
 	} else {
-		if err := execWithSpinner(ctx, w, hc, title, "docker image prune -f", doneMsg); err != nil {
-			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
+		var buf bytes.Buffer
+		var pruneErr error
+		spinErr := spinner.New().
+			Type(spinner.MiniDot).
+			Title(title).
+			Action(func() { pruneErr = actions.PruneHost(ctx, sshCfg, &buf) }).
+			Run()
+		if spinErr != nil {
+			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, spinErr)
+			return
 		}
+		if pruneErr != nil {
+			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, pruneErr)
+			return
+		}
+		fmt.Fprintln(w)
+		if buf.Len() > 0 {
+			fmt.Fprint(w, buf.String())
+		}
+		fmt.Fprintln(w, doneMsg)
 	}
 }
 
@@ -404,8 +439,7 @@ func runHostPruneQuiet(ctx context.Context, cfg *config.Config, host string) err
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
 		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
 	}
-	_, err := internalssh.Exec(ctx, sshCfg, "docker image prune -f")
-	return err
+	return actions.PruneHost(ctx, sshCfg, io.Discard)
 }
 
 // firstLine trims an error message to its first line, capped at 80 runes,
@@ -424,41 +458,16 @@ func firstLine(err error) string {
 	return s
 }
 
-// ── Check orchestration (single shared implementation) ───────────────────────
+// ── Check orchestration ──────────────────────────────────────────────────────
 
-// runChecks gathers update candidates once via registry.BuildChecker, then
-// fires the per-candidate registry HTTP probes concurrently. The gather step
-// inside BuildChecker already uses docker.NewClient (MaxConnsPerHost: 1), so
-// per-host Docker inspects serialize through one SSH pipe automatically —
-// we don't add our own throttling there. The HTTP registry calls are plain
-// network calls with an in-closure dedup for shared images.
+// runChecks delegates to actions.RunChecks — the single shared implementation
+// used by both this CLI command and the TUI Updates screen.
 func runChecks(
 	ctx context.Context,
 	cfg *config.Config,
 	targets map[string]*config.HostConfig,
 ) ([]registry.Result, error) {
-	candidates, check, cache, err := registry.BuildChecker(ctx, cfg, targets)
-	if err != nil {
-		return nil, err
-	}
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
-	results := make([]registry.Result, len(candidates))
-	var wg sync.WaitGroup
-	for i, c := range candidates {
-		wg.Add(1)
-		go func(idx int, cand registry.Candidate) {
-			defer wg.Done()
-			results[idx] = check(ctx, cand)
-		}(i, c)
-	}
-	wg.Wait()
-
-	// Persist the registry digest cache so the next run starts warm.
-	_ = registry.SaveCache(cache, "")
-	return results, nil
+	return actions.RunChecks(ctx, cfg, targets)
 }
 
 // sendNotifySummary sends a Gotify ping summarising the run. Fires even
@@ -507,33 +516,6 @@ func sendNotifySummary(cmd *cobra.Command, cfg *config.Config, results []registr
 		cmd.Printf("Notification sent: %d update(s) available\n", available)
 	}
 	return nil
-}
-
-// resolveTargets builds the target host map following the -H / --all /
-// interactive selector pattern shared across marina commands.
-func resolveTargets(cfg *config.Config, gf *GlobalFlags) (map[string]*config.HostConfig, error) {
-	targets := cfg.Hosts
-	if gf.Host != "" {
-		h, ok := cfg.Hosts[gf.Host]
-		if !ok {
-			return nil, fmt.Errorf("host %q not found in config", gf.Host)
-		}
-		targets = map[string]*config.HostConfig{gf.Host: h}
-	} else if !gf.All {
-		hostNames := make([]string, 0, len(cfg.Hosts))
-		for name := range cfg.Hosts {
-			hostNames = append(hostNames, name)
-		}
-		sort.Strings(hostNames)
-		selected, err := ui.SelectHost(hostNames)
-		if err != nil {
-			return nil, err
-		}
-		if selected != "" {
-			targets = map[string]*config.HostConfig{selected: cfg.Hosts[selected]}
-		}
-	}
-	return targets, nil
 }
 
 // ── Display helpers ──────────────────────────────────────────────────────────

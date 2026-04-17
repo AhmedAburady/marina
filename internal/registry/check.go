@@ -47,17 +47,17 @@ type CheckFn func(ctx context.Context, c Candidate) Result
 // no TTL — so rows always reflect current reality. The only dedup is an
 // in-cycle sync.Map that prevents multiple containers sharing one image
 // (e.g. three services on `postgres:14`) from issuing the same HEAD N times
-// within a single check pass. The returned *Cache is nil; it exists only
-// so existing call sites keep compiling.
+// within a single check pass.
+//
+// Per-host failures are accepted as partial results: unreachable hosts are
+// returned in hostErrs and the caller synthesises error Result rows for them.
+// The check pass is never aborted due to a single host being unreachable.
 func BuildChecker(
 	ctx context.Context,
 	cfg *config.Config,
 	targets map[string]*config.HostConfig,
-) (candidates []Candidate, check CheckFn, cache *Cache, err error) {
-	candidates, err = gatherCandidates(ctx, cfg, targets)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+) (candidates []Candidate, check CheckFn, hostErrs map[string]error, err error) {
+	candidates, hostErrs = gatherCandidates(ctx, cfg, targets)
 
 	// In-cycle dedup only — each check pass starts with an empty map so
 	// concurrent containers sharing an image share one HEAD, but the NEXT
@@ -119,14 +119,17 @@ func BuildChecker(
 		}
 	}
 
-	return candidates, checkFn, nil, nil
+	return candidates, checkFn, hostErrs, nil
 }
 
 // ── candidate gathering ───────────────────────────────────────────────────────
 
 // gatherCandidates fans out to all target hosts and collects lightweight
 // Candidate entries (no registry check yet — just container list).
-func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[string]*config.HostConfig) ([]Candidate, error) {
+// Per-host failures are returned in the map keyed by host name; the
+// successful candidates from reachable hosts are still returned so the
+// caller can run a partial check pass rather than aborting the whole run.
+func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[string]*config.HostConfig) ([]Candidate, map[string]error) {
 	type hostResult struct {
 		host  string
 		items []Candidate
@@ -151,18 +154,19 @@ func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[strin
 	}()
 
 	var all []Candidate
-	var firstErr error
+	var hostErrs map[string]error
 	for r := range ch {
 		if r.err != nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("host %q: %w", r.host, r.err)
+			if hostErrs == nil {
+				hostErrs = make(map[string]error)
 			}
+			hostErrs[r.host] = fmt.Errorf("host %q: %w", r.host, r.err)
 			continue
 		}
 		all = append(all, r.items...)
 	}
 
-	return all, firstErr
+	return all, hostErrs
 }
 
 // listCandidatesFromHost connects to one host and returns all containers as

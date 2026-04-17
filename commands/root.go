@@ -2,6 +2,7 @@
 package commands
 
 import (
+	"log/slog"
 	"os"
 
 	"github.com/charmbracelet/x/term"
@@ -18,6 +19,7 @@ type GlobalFlags struct {
 	Container string
 	Config    string
 	All       bool
+	Debug     bool
 }
 
 // NewRootCmd builds the root cobra command and registers all subcommands.
@@ -32,6 +34,13 @@ func NewRootCmd(version string) *cobra.Command {
 Zero setup required on target hosts — marina connects via native SSH.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		// Install the debug slog handler before any subcommand runs.
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			if gf.Debug {
+				stderrHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})
+				slog.SetDefault(slog.New(stderrHandler))
+			}
+		},
 		// When invoked as bare `marina` inside an interactive terminal we
 		// launch the full-screen dashboard; otherwise fall back to cobra's
 		// default help output so piping (`marina | cat`) keeps working.
@@ -59,6 +68,7 @@ Zero setup required on target hosts — marina connects via native SSH.`,
 	root.PersistentFlags().StringVarP(&gf.Container, "container", "c", "", "Target container name or ID")
 	root.PersistentFlags().StringVar(&gf.Config, "config", "", "Config file path (default ~/.config/marina/config.yaml)")
 	root.PersistentFlags().BoolVar(&gf.All, "all", false, "Target all hosts (skip host selector)")
+	root.PersistentFlags().BoolVar(&gf.Debug, "debug", false, "Enable debug logging to stderr")
 
 	root.AddCommand(
 		newHostsCmd(&gf),

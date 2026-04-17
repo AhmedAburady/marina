@@ -36,10 +36,10 @@ type SequenceResultsMsg struct {
 // Note: historically this accepted a free-form command string; that form is
 // retained for compatibility with the Updates screen's multi-step pull+up.
 // New callers should prefer actions.ContainerOp / actions.ComposeOp.
-func DockerExecCmd(sshCfg internalssh.Config, command, kind, target string) tea.Cmd {
+func DockerExecCmd(ctx context.Context, sshCfg internalssh.Config, command, kind, target string) tea.Cmd {
 	return func() tea.Msg {
 		Log().Info("action.start", "kind", kind, "target", target, "host", sshCfg.Address, "cmd", command)
-		out, err := rawExec(sshCfg, command)
+		out, err := rawExec(ctx, sshCfg, command)
 		if err != nil {
 			Log().Warn("action.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 200))
 		} else {
@@ -55,10 +55,10 @@ func DockerExecCmd(sshCfg internalssh.Config, command, kind, target string) tea.
 // start / ok|fail to ~/.config/marina/marina.log with the full composed
 // command and the first chunk of stdout so users can diagnose silent
 // "apply did nothing" cases via `tail -f`.
-func ComposeExecCmd(sshCfg internalssh.Config, dir, subCmd, kind, target string) tea.Cmd {
+func ComposeExecCmd(ctx context.Context, sshCfg internalssh.Config, dir, subCmd, kind, target string) tea.Cmd {
 	return func() tea.Msg {
 		Log().Info("compose.start", "kind", kind, "target", target, "host", sshCfg.Address, "dir", dir, "sub", subCmd)
-		out, err := actions.ComposeOp(context.Background(), sshCfg, dir, subCmd)
+		out, err := actions.ComposeOp(ctx, sshCfg, dir, subCmd)
 		if err != nil {
 			Log().Warn("compose.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 400))
 		} else {
@@ -81,8 +81,8 @@ func firstChars(s string, n int) string {
 // rawExec is a tiny ssh helper used by DockerExecCmd's free-form path. For
 // anything structured (container verbs, compose subcommands) go through the
 // actions package instead.
-func rawExec(sshCfg internalssh.Config, command string) (string, error) {
-	return internalssh.Exec(context.Background(), sshCfg, command)
+func rawExec(ctx context.Context, sshCfg internalssh.Config, command string) (string, error) {
+	return internalssh.Exec(ctx, sshCfg, command)
 }
 
 // SequenceCmds runs the given tea.Cmds in order, stopping on the first

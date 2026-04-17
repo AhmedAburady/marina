@@ -6,9 +6,8 @@ import (
 	"strings"
 
 	"charm.land/huh/v2"
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
-	internalssh "github.com/AhmedAburady/marina/internal/ssh"
-	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
 
@@ -34,84 +33,43 @@ func newPruneCmd(gf *GlobalFlags) *cobra.Command {
 	return cmd
 }
 
-// pruneCommand returns the docker command string based on the chosen flags.
-// Defaults to system prune when no specific resource flag is set.
-func pruneCommand(imagesOnly, imagesAll, volumes bool) string {
-	if imagesAll {
-		return "docker image prune -af"
-	}
-	if imagesOnly {
-		return "docker image prune -f"
-	}
-	if volumes {
-		return "docker volume prune -f"
-	}
-	return "docker system prune -f"
-}
-
 func runPrune(cmd *cobra.Command, gf *GlobalFlags, imagesOnly, imagesAll, volumes, force bool) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 
-	dockerCmd := pruneCommand(imagesOnly, imagesAll, volumes)
+	pruneOpts := actions.PruneOptions{
+		ImagesOnly: imagesOnly,
+		ImagesAll:  imagesAll,
+		Volumes:    volumes,
+	}
+	dockerCmd := actions.PruneCommand(pruneOpts)
 
 	// ── Resolve target hosts ──────────────────────────────────────────────────
-	var targets []*hostContext
+	cfg, err := config.Load(gf.Config)
+	if err != nil {
+		return err
+	}
+	if len(cfg.Hosts) == 0 {
+		cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
+		return nil
+	}
 
-	if gf.Host != "" {
-		// Single host via -H flag.
-		hc, err := resolveHost(gf)
-		if err != nil {
-			return err
-		}
-		targets = []*hostContext{hc}
-	} else {
-		// Load config for --all or interactive selector.
-		cfg, err := config.Load(gf.Config)
-		if err != nil {
-			return err
-		}
-		if len(cfg.Hosts) == 0 {
-			cmd.Println("No hosts configured. Add one with: marina hosts add <name> <address>")
-			return nil
-		}
+	hostMap, err := resolveTargets(gf, cfg)
+	if err != nil {
+		return err
+	}
 
-		hostNames := make([]string, 0, len(cfg.Hosts))
-		for name := range cfg.Hosts {
-			hostNames = append(hostNames, name)
-		}
-		sort.Strings(hostNames)
+	// Build sorted slice of hostContexts for deterministic output and
+	// sequential execution (prune is destructive — no fan-out).
+	hostNames := make([]string, 0, len(hostMap))
+	for name := range hostMap {
+		hostNames = append(hostNames, name)
+	}
+	sort.Strings(hostNames)
 
-		var selectedNames []string
-
-		if gf.All {
-			selectedNames = hostNames
-		} else {
-			// Interactive host selector.
-			selected, err := ui.SelectHost(hostNames)
-			if err != nil {
-				return err
-			}
-			if selected == "" {
-				// "All hosts" chosen in the selector.
-				selectedNames = hostNames
-			} else {
-				selectedNames = []string{selected}
-			}
-		}
-
-		for _, name := range selectedNames {
-			h := cfg.Hosts[name]
-			targets = append(targets, &hostContext{
-				cfg:  cfg,
-				host: h,
-				name: name,
-				sshCfg: internalssh.Config{
-					Address: h.SSHAddress(cfg.Settings.Username),
-					KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
-				},
-			})
-		}
+	targets := make([]*hostContext, 0, len(hostNames))
+	for _, name := range hostNames {
+		targets = append(targets, newHostContext(cfg, name, hostMap[name]))
 	}
 
 	// ── Confirmation prompt (unless --force / -y) ─────────────────────────────

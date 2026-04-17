@@ -228,9 +228,11 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		if lastOk(msg.Results) {
 			last := msg.Results[len(msg.Results)-1]
 			delete(s.errors, last.Target)
-			// If the last step was image prune for a purge, also tidy the
-			// config entry locally.
-			if last.Kind == "image.prune" {
+			// If the last step was config.save (the final purge step),
+			// the config entry has already been removed by PurgePlan's Run.
+			// removePurgedFromConfig syncs the in-memory cfg so the list
+			// refreshes correctly without a re-read from disk.
+			if last.Kind == "config.save" {
 				s.removePurgedFromConfig(last.Target)
 			}
 			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
@@ -424,7 +426,7 @@ func (s *stacksScreen) runCompose(subCmd, kind string) tea.Cmd {
 	s.pending[key] = true
 	delete(s.errors, key)
 	return tea.Batch(
-		ComposeExecCmd(r.sshCfg, r.dir, subCmd, kind, key),
+		ComposeExecCmd(s.ctx, r.sshCfg, r.dir, subCmd, kind, key),
 		s.spinner.Tick,
 	)
 }
@@ -441,8 +443,8 @@ func (s *stacksScreen) runUpdate() tea.Cmd {
 	delete(s.errors, key)
 	return tea.Batch(
 		SequenceCmds(
-			ComposeExecCmd(r.sshCfg, r.dir, "pull", "compose.pull", key),
-			ComposeExecCmd(r.sshCfg, r.dir, "up -d", "compose.up", key),
+			ComposeExecCmd(s.ctx, r.sshCfg, r.dir, "pull", "compose.pull", key),
+			ComposeExecCmd(s.ctx, r.sshCfg, r.dir, "up -d", "compose.up", key),
 		),
 		s.spinner.Tick,
 	)
@@ -548,7 +550,9 @@ func (s *stacksScreen) openUnregisterPrompt() {
 }
 
 // buildPurgeCmd captures the current row and builds the multi-step purge.
-// The closure defers row lookup so the user's focus at confirm-time is used.
+// Steps are driven by actions.PurgePlan so CLI and TUI always execute the
+// same sequence — any future step (volume removal, name normalization, etc.)
+// added to PurgePlan is automatically picked up here.
 func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	r := s.currentRow()
 	if r == nil || r.dir == "" {
@@ -557,14 +561,31 @@ func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	captured := *r
 	key := captured.host + "/" + captured.name
 	return func() tea.Cmd {
+		steps, err := actions.PurgePlan(s.ctx, s.cfg, "", captured.host, captured.name)
+		if err != nil {
+			s.errors[key] = firstLineOf(err)
+			return nil
+		}
+		cmds := make([]tea.Cmd, 0, len(steps))
+		for _, step := range steps {
+			st := step // capture loop variable
+			switch st.Kind {
+			case "compose.down":
+				cmds = append(cmds, ComposeExecCmd(s.ctx, captured.sshCfg, st.Dir, st.SubCmd, st.Kind, key))
+			case "config.save":
+				// config.save has no remote SSH component; wrap Run directly.
+				cmds = append(cmds, func() tea.Msg {
+					return ActionResultMsg{Kind: st.Kind, Target: key, Err: st.Run()}
+				})
+			default:
+				// "dir.rm", "image.prune" and any future raw-shell steps.
+				cmds = append(cmds, DockerExecCmd(s.ctx, captured.sshCfg, st.Command, st.Kind, key))
+			}
+		}
 		s.pending[key] = true
 		delete(s.errors, key)
 		return tea.Batch(
-			SequenceCmds(
-				ComposeExecCmd(captured.sshCfg, captured.dir, "down --remove-orphans", "compose.down", key),
-				DockerExecCmd(captured.sshCfg, "rm -rf "+shellQuote(captured.dir), "dir.rm", key),
-				DockerExecCmd(captured.sshCfg, "docker image prune -f", "image.prune", key),
-			),
+			SequenceCmds(cmds...),
 			s.spinner.Tick,
 		)
 	}
@@ -621,12 +642,3 @@ func splitKey(key string) (host, name string) {
 	return before, after
 }
 
-// shellQuote wraps a path in single quotes for safe use in a remote shell.
-// Paths with embedded quotes are rejected (returned empty) so we never issue
-// a malformed command.
-func shellQuote(s string) string {
-	if strings.ContainsAny(s, "'\"\\") {
-		return ""
-	}
-	return "'" + s + "'"
-}
