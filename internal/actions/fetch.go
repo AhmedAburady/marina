@@ -66,9 +66,8 @@ func FetchAllHosts(
 	}
 
 	// Persist all live-success snapshots in one atomic write: Load once, merge
-	// every live result, Save once. This eliminates the concurrent
-	// Load→modify→Save races that occurred when each goroutine called
-	// SaveHostSnapshot independently.
+	// every live result, Save once. Running this once per fetch (rather than
+	// per-goroutine) avoids concurrent Load→modify→Save races on state.json.
 	persistSnapshots(results)
 
 	return results
@@ -118,8 +117,8 @@ func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchRe
 		}
 		return HostFetchResult{Host: host, Err: err}
 	}
-	// Persistence is handled by FetchAllHosts via persistSnapshots after all
-	// goroutines complete — do not call SaveHostSnapshot here.
+	// Persistence is handled by FetchAllHosts via persistSnapshots once all
+	// goroutines complete.
 	return HostFetchResult{Host: host, Containers: containers}
 }
 

@@ -7,22 +7,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/AhmedAburady/marina/internal/config"
 )
 
-// saveMu guards the Load→modify→Save sequence in SaveHostSnapshot so that
-// single-host CLI callers (which do not go through FetchAllHosts' aggregation
-// path) cannot race with each other.
-var saveMu sync.Mutex
-
 // DefaultPath returns the state file path inside the marina config directory.
-// On macOS this is ~/Library/Application Support/marina/state.json,
-// on Linux it honours XDG_CONFIG_HOME, on Windows %AppData%\marina\state.json.
-// A one-release read fallback applies: if the canonical dir is absent but
-// ~/.config/marina/ exists, the legacy path is returned (and a warning logged).
 func DefaultPath() (string, error) {
 	dir, err := config.ResolveConfigDir()
 	if err != nil {
@@ -145,20 +135,3 @@ func Save(store *Store, path string) error {
 	return nil
 }
 
-// SaveHostSnapshot updates the snapshot for a single host and persists.
-// It is guarded by a mutex so single-host callers are safe from concurrent
-// Load→modify→Save races. For bulk updates across many hosts, prefer the
-// aggregation pattern in FetchAllHosts (load once, merge all, save once).
-func SaveHostSnapshot(hostName string, snapshot *HostSnapshot, path string) error {
-	saveMu.Lock()
-	defer saveMu.Unlock()
-
-	store, err := Load(path)
-	if err != nil {
-		// Non-fatal — start fresh if state is corrupted.
-		store = &Store{Hosts: make(map[string]*HostSnapshot)}
-	}
-	snapshot.UpdatedAt = time.Now()
-	store.Hosts[hostName] = snapshot
-	return Save(store, path)
-}
