@@ -91,10 +91,9 @@ func Load(path string) (*Store, error) {
 // Save writes the store to the state file atomically.
 // It writes to a temporary file in the same directory, syncs, closes, chmods,
 // then renames over the destination — POSIX-atomic and safe on Windows too.
-// When path is empty, Save always writes to the canonical (new) location.
 func Save(store *Store, path string) error {
 	if path == "" {
-		dir, err := config.ResolveConfigDirForWrite()
+		dir, err := config.ResolveConfigDir()
 		if err != nil {
 			return fmt.Errorf("resolve config dir: %w", err)
 		}

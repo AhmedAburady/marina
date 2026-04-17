@@ -26,12 +26,6 @@ func ResolveConfigDir() (string, error) {
 	return dir, nil
 }
 
-// ResolveConfigDirForWrite is kept as an alias for compatibility with earlier
-// code that distinguished read vs write paths. Both are now the same.
-func ResolveConfigDirForWrite() (string, error) {
-	return ResolveConfigDir()
-}
-
 func configDir() (string, error) {
 	if runtime.GOOS == "windows" {
 		base, err := os.UserConfigDir()

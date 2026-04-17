@@ -132,12 +132,11 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Save writes cfg to path atomically. If path is empty, the canonical config
-// path is used (writes always go to the canonical location, never legacy).
-// Parent directories are created as needed.
+// Save writes cfg to path atomically. If path is empty, the default config
+// path is used. Parent directories are created as needed.
 func Save(cfg *Config, path string) error {
 	if path == "" {
-		dir, err := ResolveConfigDirForWrite()
+		dir, err := ResolveConfigDir()
 		if err != nil {
 			return fmt.Errorf("resolve config dir: %w", err)
 		}

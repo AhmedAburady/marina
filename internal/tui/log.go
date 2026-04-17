@@ -36,9 +36,7 @@ var (
 // on setup failure so the TUI never crashes due to a log file issue.
 func Log() *slog.Logger {
 	logOnce.Do(func() {
-		// Always write to the canonical dir (never legacy) so new log entries
-		// accumulate in the right place even if config was read from legacy.
-		dir, err := config.ResolveConfigDirForWrite()
+		dir, err := config.ResolveConfigDir()
 		if err != nil {
 			logger = slog.New(slog.DiscardHandler)
 			return
