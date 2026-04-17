@@ -106,6 +106,7 @@ func runPrune(cmd *cobra.Command, gf *GlobalFlags, imagesOnly, imagesAll, volume
 	}
 
 	// ── Run prune sequentially (destructive operation) ────────────────────────
+	var failures []actions.HostStackErr
 	for _, hc := range targets {
 		err := execWithSpinner(ctx, w, hc,
 			fmt.Sprintf("Pruning Docker resources on %s...", hc.name),
@@ -114,8 +115,9 @@ func runPrune(cmd *cobra.Command, gf *GlobalFlags, imagesOnly, imagesAll, volume
 		)
 		if err != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "warning: host %q: %v\n", hc.name, err)
+			failures = append(failures, actions.HostStackErr{Host: hc.name, Err: err})
 		}
 	}
 
-	return nil
+	return actions.NewApplyErr("prune", failures)
 }

@@ -1,0 +1,14 @@
+[1;92m▸ testhost-with-long-name[m
+[90m╭[m[90m──────────────────[m[90m┬[m[90m──────────────────[m[90m┬[m[90m──────────────────[m[90m┬[m[90m──────────────────[m[90m┬[m[90m──[m[90m╮[m
+[90m│[m [1;94mSTACK[m            [90m│[m [1;94mCONTAINER[m        [90m│[m [1;94mIMAGE[m            [90m│[m [1;94mSTATUS[m           [90m│[m [1;94m[m [90m│[m
+[90m├[m[90m──────────────────[m[90m┼[m[90m──────────────────[m[90m┼[m[90m──────────────────[m[90m┼[m[90m──────────────────[m[90m┼[m[90m──[m[90m┤[m
+[90m│[m [93ma-very-long-[m     [90m│[m [93manother-very-[m    [90m│[m [93mregistry.example[m [90m│[m [93mRestarting (1) 5[m [90m│[m [93m[m [90m│[m
+[90m│[m [93mstack-name-here[m  [90m│[m [93mlong-service-[m    [90m│[m [93m.com/org/another[m [90m│[m [93mseconds ago[m      [90m│[m  [90m│[m
+[90m│[m                  [90m│[m [93mname-that-is-[m    [90m│[m [93m-image:latest-[m   [90m│[m                  [90m│[m  [90m│[m
+[90m│[m                  [90m│[m [93mquite-wide[m       [90m│[m [93mstable-release[m   [90m│[m                  [90m│[m  [90m│[m
+[90m│[m a-very-long-     [90m│[m very-long-       [90m│[m registry.example [90m│[m Up 30 minutes    [90m│[m  [90m│[m
+[90m│[m stack-name-here  [90m│[m container-name-  [90m│[m .com/org/very-   [90m│[m                  [90m│[m  [90m│[m
+[90m│[m                  [90m│[m that-exceeds-    [90m│[m long-image-      [90m│[m                  [90m│[m  [90m│[m
+[90m│[m                  [90m│[m normal-column-   [90m│[m name:with-a-     [90m│[m                  [90m│[m  [90m│[m
+[90m│[m                  [90m│[m width            [90m│[m long-tag-too     [90m│[m                  [90m│[m  [90m│[m
+[90m╰[m[90m──────────────────[m[90m┴[m[90m──────────────────[m[90m┴[m[90m──────────────────[m[90m┴[m[90m──────────────────[m[90m┴[m[90m──[m[90m╯[m

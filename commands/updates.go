@@ -237,6 +237,8 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 	// Only enter the apply block when there's something to apply. A no-op
 	// run with prune_after_update: true falls straight through to the prune
 	// block below, skipping the "Applying 0 update(s)…" noise.
+	var failures []actions.HostStackErr
+
 	switch {
 	case len(hostGroups) == 0:
 		// nothing to apply — already printed "All images are up-to-date."
@@ -244,7 +246,9 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 		// Single-host fast path: keep the existing spinner / stream behaviour
 		// verbatim since there's nothing to parallelise.
 		for _, k := range keys {
-			runStackUpdate(cmd.Context(), w, ew, cfg, k, stackDirs[k], stream)
+			if err := runStackUpdate(cmd.Context(), w, ew, cfg, k, stackDirs[k], stream); err != nil {
+				failures = append(failures, actions.HostStackErr{Host: k.Host, Stack: k.Stack, Err: err})
+			}
 		}
 	default:
 		// Multi-host: one goroutine per host, each chewing through its own
@@ -268,6 +272,9 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 					report(w, fmt.Sprintf("  [%s] %s: updating…", host, k.Stack))
 					if err := runStackUpdateQuiet(cmd.Context(), cfg, k, stackDirs[k]); err != nil {
 						report(ew, fmt.Sprintf("  [%s] %s: FAILED — %v", host, k.Stack, firstLine(err)))
+						mu.Lock()
+						failures = append(failures, actions.HostStackErr{Host: k.Host, Stack: k.Stack, Err: err})
+						mu.Unlock()
 						continue
 					}
 					report(w, fmt.Sprintf("  [%s] %s: ✓ updated", host, k.Stack))
@@ -290,7 +297,9 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 		sort.Strings(pruneHosts)
 
 		if len(pruneHosts) == 1 {
-			runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0], stream)
+			if err := runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0], stream); err != nil {
+				failures = append(failures, actions.HostStackErr{Host: pruneHosts[0], Err: err})
+			}
 		} else if len(pruneHosts) > 1 {
 			var mu sync.Mutex
 			report := func(out io.Writer, line string) {
@@ -307,6 +316,9 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 					report(w, fmt.Sprintf("  [%s] pruning…", host))
 					if err := runHostPruneQuiet(cmd.Context(), cfg, host); err != nil {
 						report(ew, fmt.Sprintf("  [%s] prune FAILED — %v", host, firstLine(err)))
+						mu.Lock()
+						failures = append(failures, actions.HostStackErr{Host: host, Err: err})
+						mu.Unlock()
 						return
 					}
 					report(w, fmt.Sprintf("  [%s] ✓ pruned", host))
@@ -316,13 +328,14 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 			report(w, "Done.")
 		}
 	}
-	return nil
+	return actions.NewApplyErr("update", failures)
 }
 
 // runStackUpdate is the single-host path: spinner or streaming per --stream.
 // Delegates to actions.ApplyStackUpdate for two-step pull+up semantics that
-// match the TUI's SequenceCmds(pull, up) flow.
-func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string, stream bool) {
+// match the TUI's SequenceCmds(pull, up) flow. Returns the first error
+// encountered so the caller can accumulate failures.
+func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string, stream bool) error {
 	hostCfg := cfg.Hosts[k.Host]
 	sshCfg := internalssh.Config{
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
@@ -334,7 +347,7 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 		resolved, err := findStackDir(ctx, hc, k.Stack)
 		if err != nil {
 			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
-			return
+			return err
 		}
 		dir = resolved
 	}
@@ -346,7 +359,7 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 		fmt.Fprintf(w, "\n── %s ──\n", title)
 		if err := actions.ApplyStackUpdate(ctx, sshCfg, dir, w); err != nil {
 			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
-			return
+			return err
 		}
 		fmt.Fprintln(w, doneMsg)
 	} else {
@@ -359,11 +372,11 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 			Run()
 		if spinErr != nil {
 			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, spinErr)
-			return
+			return spinErr
 		}
 		if applyErr != nil {
 			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, applyErr)
-			return
+			return applyErr
 		}
 		fmt.Fprintln(w)
 		if buf.Len() > 0 {
@@ -371,6 +384,7 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 		}
 		fmt.Fprintln(w, doneMsg)
 	}
+	return nil
 }
 
 // runStackUpdateQuiet is the multi-host goroutine worker: no spinner (they
@@ -394,8 +408,9 @@ func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, di
 }
 
 // runHostPrune / runHostPruneQuiet mirror the stack helpers for the
-// post-apply image prune pass. Delegate to actions.PruneHost.
-func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string, stream bool) {
+// post-apply image prune pass. Delegate to actions.PruneHost. Returns the
+// first error encountered so the caller can accumulate failures.
+func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string, stream bool) error {
 	hostCfg := cfg.Hosts[host]
 	sshCfg := internalssh.Config{
 		Address: hostCfg.SSHAddress(cfg.Settings.Username),
@@ -407,6 +422,7 @@ func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host
 		fmt.Fprintf(w, "\n── %s ──\n", title)
 		if err := actions.PruneHost(ctx, sshCfg, w); err != nil {
 			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
+			return err
 		}
 		fmt.Fprintln(w, doneMsg)
 	} else {
@@ -419,11 +435,11 @@ func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host
 			Run()
 		if spinErr != nil {
 			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, spinErr)
-			return
+			return spinErr
 		}
 		if pruneErr != nil {
 			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, pruneErr)
-			return
+			return pruneErr
 		}
 		fmt.Fprintln(w)
 		if buf.Len() > 0 {
@@ -431,6 +447,7 @@ func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host
 		}
 		fmt.Fprintln(w, doneMsg)
 	}
+	return nil
 }
 
 func runHostPruneQuiet(ctx context.Context, cfg *config.Config, host string) error {
