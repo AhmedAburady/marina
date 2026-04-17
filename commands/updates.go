@@ -3,10 +3,12 @@ package commands
 import (
 	"context"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync"
 
+	"charm.land/huh/v2"
 	"charm.land/huh/v2/spinner"
 	"charm.land/lipgloss/v2"
 	"github.com/AhmedAburady/marina/internal/config"
@@ -16,6 +18,10 @@ import (
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
+
+// stackKey identifies a compose stack on a host. Shared by runUpdateApply
+// and its helpers so the parallel-per-host path doesn't need its own type.
+type stackKey struct{ Host, Stack string }
 
 // updateAvailableStyle highlights rows that have an update ready.
 var updateAvailableStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")).Bold(true)
@@ -38,16 +44,18 @@ func newCheckCmd(gf *GlobalFlags) *cobra.Command {
 }
 
 func newUpdateCmd(gf *GlobalFlags) *cobra.Command {
-	var yes bool
+	var yes, stream bool
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Apply available image updates",
-		Example: `  marina update --all --yes`,
+		Example: `  marina update --all --yes
+  marina update -H myhost -s mystack --stream`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdateApply(cmd, gf, yes)
+			return runUpdateApply(cmd, gf, yes, stream)
 		},
 	}
-	cmd.Flags().BoolVar(&yes, "yes", false, "Confirm updates without prompting (required)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip the interactive confirmation prompt")
+	cmd.Flags().BoolVar(&stream, "stream", false, "Stream docker compose output live instead of running behind a spinner")
 	return cmd
 }
 
@@ -121,12 +129,11 @@ func runCheckCmd(cmd *cobra.Command, gf *GlobalFlags, notify bool) error {
 	return nil
 }
 
-// runUpdateApply requires --yes, gathers check results once, then pulls and
-// recreates any stack whose images have updates.
-func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
-	if !yes {
-		return fmt.Errorf("--yes flag is required to apply updates (use: marina update --yes)")
-	}
+// runUpdateApply gathers check results once, confirms with the user (unless
+// --yes bypasses), then runs `docker compose pull && up -d` for each stack
+// whose images have updates. Output defaults to behind a spinner; pass
+// `--stream` to see live docker compose progress instead.
+func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error {
 	cfg, err := config.Load(gf.Config)
 	if err != nil {
 		return err
@@ -155,7 +162,6 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
 	}
 
 	// Group updatable results by (host, stack) and pick a dir (first non-empty).
-	type stackKey struct{ Host, Stack string }
 	stackDirs := make(map[stackKey]string)
 	var keys []stackKey
 	for _, r := range results {
@@ -170,10 +176,16 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
 			stackDirs[k] = r.Dir
 		}
 	}
+	w := cmd.OutOrStdout()
+	ew := cmd.ErrOrStderr()
+
 	if len(keys) == 0 {
 		cmd.Println("All images are up-to-date.")
-		return nil
+		// Fall through to the prune block below — `prune_after_update: true`
+		// must be honoured even on no-op runs so accumulated dangling images
+		// from past updates get swept up.
 	}
+
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].Host != keys[j].Host {
 			return keys[i].Host < keys[j].Host
@@ -181,60 +193,235 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
 		return keys[i].Stack < keys[j].Stack
 	})
 
-	w := cmd.OutOrStdout()
-	for _, k := range keys {
-		dir := stackDirs[k]
-		hostCfg := cfg.Hosts[k.Host]
-		hc := &hostContext{
-			cfg:  cfg,
-			host: hostCfg,
-			name: k.Host,
-			sshCfg: internalssh.Config{
-				Address: hostCfg.SSHAddress(cfg.Settings.Username),
-				KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-			},
+	// Interactive confirmation when --yes is not passed and there are updates
+	// to apply. Skipped entirely on a no-op run since there's nothing to
+	// confirm.
+	if len(keys) > 0 && !yes {
+		labels := make([]string, 0, len(keys))
+		for _, k := range keys {
+			labels = append(labels, fmt.Sprintf("  %s/%s", k.Host, k.Stack))
 		}
-		title := fmt.Sprintf("Updating stack %q on %q...", k.Stack, k.Host)
-		doneMsg := fmt.Sprintf("Updated stack %q on %q.", k.Stack, k.Host)
-		if dir != "" {
-			command := fmt.Sprintf("cd %s && docker compose pull && docker compose up -d", dir)
-			if err := execWithSpinner(cmd.Context(), w, hc, title, command, doneMsg); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s/%s: %v\n", k.Host, k.Stack, err)
-			}
-		} else {
-			commandFmt := "cd %s && docker compose pull && docker compose up -d"
-			if err := execStackWithSpinner(cmd.Context(), w, hc, k.Stack, title, commandFmt, doneMsg); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: %s/%s: %v\n", k.Host, k.Stack, err)
-			}
+		title := fmt.Sprintf("Apply %d update(s)?", len(keys))
+		desc := strings.Join(labels, "\n")
+
+		var confirmed bool
+		formErr := huh.NewForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title(title).
+					Description(desc).
+					Value(&confirmed),
+			),
+		).Run()
+		if formErr != nil {
+			return formErr
+		}
+		if !confirmed {
+			cmd.Println("Aborted.")
+			return nil
 		}
 	}
 
-	// Optional image prune after all stacks are updated — once per unique host.
-	if cfg.Settings.PruneAfterUpdate {
-		pruned := make(map[string]bool)
+	// Group by host. Same-host stacks MUST stay sequential — MaxConnsPerHost:1
+	// on the docker transport forces all SSH traffic through one pipe, so
+	// firing two `compose pull` commands concurrently against one host just
+	// serializes through the same bottleneck with uglier output. Different
+	// hosts have independent SSH pipes and can run simultaneously.
+	hostGroups := make(map[string][]stackKey)
+	for _, k := range keys {
+		hostGroups[k.Host] = append(hostGroups[k.Host], k)
+	}
+
+	// Only enter the apply block when there's something to apply. A no-op
+	// run with prune_after_update: true falls straight through to the prune
+	// block below, skipping the "Applying 0 update(s)…" noise.
+	switch {
+	case len(hostGroups) == 0:
+		// nothing to apply — already printed "All images are up-to-date."
+	case len(hostGroups) == 1:
+		// Single-host fast path: keep the existing spinner / stream behaviour
+		// verbatim since there's nothing to parallelise.
 		for _, k := range keys {
-			if pruned[k.Host] {
-				continue
+			runStackUpdate(cmd.Context(), w, ew, cfg, k, stackDirs[k], stream)
+		}
+	default:
+		// Multi-host: one goroutine per host, each chewing through its own
+		// sequential queue. Spinners don't compose across goroutines (they
+		// fight for the cursor), so the multi-host path reports per-stack
+		// status via one-line messages guarded by a shared mutex.
+		var mu sync.Mutex
+		report := func(out io.Writer, line string) {
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Fprintln(out, line)
+		}
+
+		report(w, fmt.Sprintf("Applying %d update(s) across %d host(s)...", len(keys), len(hostGroups)))
+		var wg sync.WaitGroup
+		for host, hks := range hostGroups {
+			wg.Add(1)
+			go func(host string, hks []stackKey) {
+				defer wg.Done()
+				for _, k := range hks {
+					report(w, fmt.Sprintf("  [%s] %s: updating…", host, k.Stack))
+					if err := runStackUpdateQuiet(cmd.Context(), cfg, k, stackDirs[k]); err != nil {
+						report(ew, fmt.Sprintf("  [%s] %s: FAILED — %v", host, k.Stack, firstLine(err)))
+						continue
+					}
+					report(w, fmt.Sprintf("  [%s] %s: ✓ updated", host, k.Stack))
+				}
+			}(host, hks)
+		}
+		wg.Wait()
+		report(w, "Done.")
+	}
+
+	// Post-apply image prune — gated on `prune_after_update`. Runs against
+	// every targeted host, not just the ones where an update actually
+	// landed, so dangling images left over from earlier runs still get
+	// swept up on a no-op cycle. Same parallelism rules as the apply loop.
+	if cfg.Settings.PruneAfterUpdate {
+		pruneHosts := make([]string, 0, len(targets))
+		for host := range targets {
+			pruneHosts = append(pruneHosts, host)
+		}
+		sort.Strings(pruneHosts)
+
+		if len(pruneHosts) == 1 {
+			runHostPrune(cmd.Context(), w, ew, cfg, pruneHosts[0], stream)
+		} else if len(pruneHosts) > 1 {
+			var mu sync.Mutex
+			report := func(out io.Writer, line string) {
+				mu.Lock()
+				defer mu.Unlock()
+				fmt.Fprintln(out, line)
 			}
-			pruned[k.Host] = true
-			hostCfg := cfg.Hosts[k.Host]
-			hc := &hostContext{
-				cfg:  cfg,
-				host: hostCfg,
-				name: k.Host,
-				sshCfg: internalssh.Config{
-					Address: hostCfg.SSHAddress(cfg.Settings.Username),
-					KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-				},
+			report(w, fmt.Sprintf("Pruning old images on %d host(s)...", len(pruneHosts)))
+			var wg sync.WaitGroup
+			for _, host := range pruneHosts {
+				wg.Add(1)
+				go func(host string) {
+					defer wg.Done()
+					report(w, fmt.Sprintf("  [%s] pruning…", host))
+					if err := runHostPruneQuiet(cmd.Context(), cfg, host); err != nil {
+						report(ew, fmt.Sprintf("  [%s] prune FAILED — %v", host, firstLine(err)))
+						return
+					}
+					report(w, fmt.Sprintf("  [%s] ✓ pruned", host))
+				}(host)
 			}
-			title := fmt.Sprintf("Pruning old images on %q...", k.Host)
-			doneMsg := fmt.Sprintf("Pruned old images on %q.", k.Host)
-			if err := execWithSpinner(cmd.Context(), w, hc, title, "docker image prune -f", doneMsg); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: prune on %s: %v\n", k.Host, err)
-			}
+			wg.Wait()
+			report(w, "Done.")
 		}
 	}
 	return nil
+}
+
+// runStackUpdate is the single-host path: spinner or streaming per --stream.
+func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string, stream bool) {
+	hostCfg := cfg.Hosts[k.Host]
+	sshCfg := internalssh.Config{
+		Address: hostCfg.SSHAddress(cfg.Settings.Username),
+		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
+	}
+	hc := &hostContext{cfg: cfg, host: hostCfg, name: k.Host, sshCfg: sshCfg}
+
+	if dir == "" {
+		resolved, err := findStackDir(ctx, hc, k.Stack)
+		if err != nil {
+			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
+			return
+		}
+		dir = resolved
+	}
+
+	command := fmt.Sprintf("cd %s && docker compose pull && docker compose up -d", dir)
+	title := fmt.Sprintf("Updating stack %q on %q...", k.Stack, k.Host)
+	doneMsg := fmt.Sprintf("Updated stack %q on %q.", k.Stack, k.Host)
+
+	if stream {
+		fmt.Fprintf(w, "\n── %s ──\n", title)
+		if err := internalssh.Stream(ctx, sshCfg, command, w, ew); err != nil {
+			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
+			return
+		}
+		fmt.Fprintln(w, doneMsg)
+	} else {
+		if err := execWithSpinner(ctx, w, hc, title, command, doneMsg); err != nil {
+			fmt.Fprintf(ew, "warning: %s/%s: %v\n", k.Host, k.Stack, err)
+		}
+	}
+}
+
+// runStackUpdateQuiet is the multi-host goroutine worker: no spinner (they
+// don't compose) and no streaming — returns an error that the caller
+// reports through the shared status line mutex.
+func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, dir string) error {
+	hostCfg := cfg.Hosts[k.Host]
+	sshCfg := internalssh.Config{
+		Address: hostCfg.SSHAddress(cfg.Settings.Username),
+		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
+	}
+	hc := &hostContext{cfg: cfg, host: hostCfg, name: k.Host, sshCfg: sshCfg}
+	if dir == "" {
+		resolved, err := findStackDir(ctx, hc, k.Stack)
+		if err != nil {
+			return err
+		}
+		dir = resolved
+	}
+	_, err := internalssh.Exec(ctx, sshCfg, fmt.Sprintf("cd %s && docker compose pull && docker compose up -d", dir))
+	return err
+}
+
+// runHostPrune / runHostPruneQuiet mirror the stack helpers for the
+// post-apply image prune pass.
+func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string, stream bool) {
+	hostCfg := cfg.Hosts[host]
+	sshCfg := internalssh.Config{
+		Address: hostCfg.SSHAddress(cfg.Settings.Username),
+		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
+	}
+	hc := &hostContext{cfg: cfg, host: hostCfg, name: host, sshCfg: sshCfg}
+	title := fmt.Sprintf("Pruning old images on %q...", host)
+	doneMsg := fmt.Sprintf("Pruned old images on %q.", host)
+	if stream {
+		fmt.Fprintf(w, "\n── %s ──\n", title)
+		if err := internalssh.Stream(ctx, sshCfg, "docker image prune -f", w, ew); err != nil {
+			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
+		}
+		fmt.Fprintln(w, doneMsg)
+	} else {
+		if err := execWithSpinner(ctx, w, hc, title, "docker image prune -f", doneMsg); err != nil {
+			fmt.Fprintf(ew, "warning: prune on %s: %v\n", host, err)
+		}
+	}
+}
+
+func runHostPruneQuiet(ctx context.Context, cfg *config.Config, host string) error {
+	hostCfg := cfg.Hosts[host]
+	sshCfg := internalssh.Config{
+		Address: hostCfg.SSHAddress(cfg.Settings.Username),
+		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
+	}
+	_, err := internalssh.Exec(ctx, sshCfg, "docker image prune -f")
+	return err
+}
+
+// firstLine trims an error message to its first line, capped at 80 runes,
+// so one-liner status reports stay tidy.
+func firstLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	if len(s) > 80 {
+		s = s[:79] + "…"
+	}
+	return s
 }
 
 // ── Check orchestration (single shared implementation) ───────────────────────
