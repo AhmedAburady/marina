@@ -189,11 +189,12 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 	// Stacks where every service is stopped fall out of the list naturally
 	// because all of their containers get filtered here.
 	//
-	// Inspect each unique *running* image concurrently — transport serializes
-	// via MaxConnsPerHost: 1.
+	// Inspect each unique *running* image sequentially. docker.Transport sets
+	// MaxConnsPerHost = 1, so all Docker API traffic is serialized through a
+	// single SSH pipe anyway — goroutine fan-out here adds mutex + WaitGroup
+	// overhead with no wall-clock benefit. If MaxConnsPerHost is ever raised,
+	// reintroduce concurrency with errgroup.SetLimit(N) to match the new cap.
 	cache := make(map[string]docker.ImageMeta)
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 
 	seen := make(map[string]bool)
 	for _, c := range containers {
@@ -204,19 +205,12 @@ func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey strin
 			continue
 		}
 		seen[c.ImageID] = true
-		wg.Add(1)
-		go func(id, fallbackImage string, cID string) {
-			defer wg.Done()
-			meta, err := dc.InspectContainer(ctx, cID)
-			mu.Lock()
-			if err != nil && meta.Ref == "" {
-				meta.Ref = fallbackImage
-			}
-			cache[id] = meta
-			mu.Unlock()
-		}(c.ImageID, c.Image, c.ID)
+		meta, err := dc.InspectContainer(ctx, c.ID)
+		if err != nil && meta.Ref == "" {
+			meta.Ref = c.Image
+		}
+		cache[c.ImageID] = meta
 	}
-	wg.Wait()
 
 	out := make([]Candidate, 0, len(containers))
 	for _, c := range containers {

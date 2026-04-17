@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
 )
@@ -45,18 +43,15 @@ func RunChecks(
 	}
 
 	// Fan out HEAD requests with a concurrency cap of 8 so we don't
-	// hammer Docker Hub with unbounded goroutines (P2-2).
-	results := make([]registry.Result, len(candidates))
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(8)
-	for i, c := range candidates {
-		i, c := i, c
-		g.Go(func() error {
-			results[i] = check(gctx, c)
-			return nil // check never returns an error — errors live in Result.Error
-		})
+	// hammer Docker Hub with unbounded goroutines. FanOut yields results in
+	// completion order; RunCheckCmd re-sorts by (host, stack, container) so
+	// ordering here is not load-bearing.
+	results := make([]registry.Result, 0, len(candidates))
+	for r := range FanOut(ctx, candidates, 8, func(ctx context.Context, c registry.Candidate) registry.Result {
+		return check(ctx, c)
+	}) {
+		results = append(results, r)
 	}
-	_ = g.Wait() // cannot fail: goroutines return nil
 
 	return append(results, errRows...), nil
 }

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -47,21 +46,22 @@ func FetchAllHosts(
 		return results
 	}
 
-	ch := make(chan HostFetchResult, len(targets))
-	var wg sync.WaitGroup
-	for name, h := range targets {
-		wg.Add(1)
-		go func(name, address, sshKey string) {
-			defer wg.Done()
-			ch <- fetchOneHost(ctx, name, address, sshKey)
-		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
+	// Build a flat slice so FanOut can range over it cleanly.
+	type hostEntry struct {
+		name, address, sshKey string
 	}
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
+	entries := make([]hostEntry, 0, len(targets))
+	for name, h := range targets {
+		entries = append(entries, hostEntry{
+			name:    name,
+			address: h.SSHAddress(cfg.Settings.Username),
+			sshKey:  h.ResolvedSSHKey(cfg.Settings.SSHKey),
+		})
+	}
 
-	for r := range ch {
+	for r := range FanOut(ctx, entries, 0, func(ctx context.Context, e hostEntry) HostFetchResult {
+		return fetchOneHost(ctx, e.name, e.address, e.sshKey)
+	}) {
 		results[r.Host] = r
 	}
 
