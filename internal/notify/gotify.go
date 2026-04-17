@@ -57,13 +57,15 @@ func SendGotify(ctx context.Context, cfg GotifyConfig, title, message string) er
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Gotify-Key", token)
 
+	// POST /message should never redirect in practice; following one would
+	// forward the X-Gotify-Key header (a custom header Go does not strip on
+	// cross-origin redirects) to whatever target Location points at. Refuse
+	// all redirects unconditionally so the token cannot be exfiltrated via
+	// a compromised TLS proxy, vanity-domain shim, or DNS hijack.
 	client := &http.Client{
 		Timeout: 10 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-				return fmt.Errorf("gotify redirect from https to %s refused: possible token exfiltration", req.URL.Scheme)
-			}
-			return nil
+			return http.ErrUseLastResponse
 		},
 	}
 	resp, err := client.Do(req)

@@ -558,7 +558,9 @@ func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	captured := *r
 	key := captured.host + "/" + captured.name
 	return func() tea.Cmd {
-		steps, err := actions.PurgePlan(s.ctx, s.cfg, "", captured.host, captured.name)
+		// Use the no-SSH variant — captured.dir is already known from the
+		// displayed row, and this closure runs on the BubbleTea event loop.
+		steps, err := actions.PurgePlanFromDir(s.ctx, s.cfg, "", captured.host, captured.name, captured.dir)
 		if err != nil {
 			s.errors[key] = strutil.FirstLine(err.Error(), 40)
 			return nil

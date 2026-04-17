@@ -176,14 +176,30 @@ type PurgeStep struct {
 // The plan captures everything the CLI's `marina stacks purge` used to do
 // inline, exposed as a reusable list so the TUI can drive the exact same
 // sequence with per-step UI updates.
+//
+// This wrapper performs an SSH round-trip via FindStackDir to locate the
+// compose working directory. Callers that already know the dir (e.g. the
+// TUI, which has it from the displayed row) should call PurgePlanFromDir
+// directly to avoid the network call on the hot path.
 func PurgePlan(ctx context.Context, cfg *config.Config, configPath, host, stack string) ([]PurgeStep, error) {
+	dir, err := FindStackDir(ctx, cfg, host, stack)
+	if err != nil {
+		return nil, err
+	}
+	return PurgePlanFromDir(ctx, cfg, configPath, host, stack, dir)
+}
+
+// PurgePlanFromDir is the core plan builder. It does NOT issue any network
+// calls — all SSH work is deferred to PurgeStep.Run closures so the caller
+// controls concurrency (in particular the TUI builds the step list on the
+// BubbleTea goroutine and must not block it with I/O).
+func PurgePlanFromDir(ctx context.Context, cfg *config.Config, configPath, host, stack, dir string) ([]PurgeStep, error) {
 	sshCfg := HostSSHConfig(cfg, host)
 	if sshCfg == nil {
 		return nil, fmt.Errorf("host %q not found", host)
 	}
-	dir, err := FindStackDir(ctx, cfg, host, stack)
-	if err != nil {
-		return nil, err
+	if dir == "" {
+		return nil, fmt.Errorf("stack directory is empty for %s/%s", host, stack)
 	}
 	quotedDir := ShellQuote(dir)
 

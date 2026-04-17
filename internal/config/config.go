@@ -81,12 +81,12 @@ type GotifyConfig struct {
 	Priority int    `yaml:"priority"`
 }
 
-// DefaultPath returns the default config file path.
-// On macOS this is ~/Library/Application Support/marina/config.yaml,
-// on Linux it honours XDG_CONFIG_HOME (defaulting to ~/.config/marina/),
-// and on Windows it uses %AppData%\marina\config.yaml.
-// A one-release read fallback returns the legacy ~/.config/marina/ path
-// when the canonical directory does not yet exist but the legacy one does.
+// DefaultPath returns the default config file path:
+//   - unix (linux, darwin, *bsd): ~/.config/marina/config.yaml
+//   - windows:                    %AppData%\marina\config.yaml
+//
+// XDG_CONFIG_HOME is intentionally not honoured on unix; see paths.go for
+// the rationale on keeping ~/.config on all unix (including macOS).
 func DefaultPath() (string, error) {
 	dir, err := ResolveConfigDir()
 	if err != nil {
