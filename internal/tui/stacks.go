@@ -14,8 +14,8 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
-	"github.com/AhmedAburady/marina/internal/discovery"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // CLI-matching semantic colours for stack rows. Values lifted verbatim
@@ -211,7 +211,7 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case ActionResultMsg:
 		delete(s.pending, msg.Target)
 		if msg.Err != nil {
-			s.errors[msg.Target] = firstLineOf(msg.Err)
+			s.errors[msg.Target] = strutil.FirstLine(msg.Err.Error(), 40)
 		} else {
 			delete(s.errors, msg.Target)
 			return s, FetchAllHostsCmd(s.ctx, s.cfg, s.cfg.Hosts)
@@ -222,7 +222,7 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		for _, r := range msg.Results {
 			delete(s.pending, r.Target)
 			if r.Err != nil {
-				s.errors[r.Target] = firstLineOf(r.Err)
+				s.errors[r.Target] = strutil.FirstLine(r.Err.Error(), 40)
 			}
 		}
 		// After a successful full sequence, drop any prior error + refresh.
@@ -263,7 +263,7 @@ func (s *stacksScreen) View(width, height int) string {
 	if s.err != nil {
 		return panelLines(width, height, []string{
 			spacer(width),
-			errorNote(width, firstLineOf(s.err)),
+			errorNote(width, strutil.FirstLine(s.err.Error(), 40)),
 		})
 	}
 	if len(s.rows) == 0 {
@@ -356,7 +356,7 @@ func (s *stacksScreen) Modal() (string, bool) {
 
 func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 	// Sort hosts alphabetically, but PRESERVE the per-host ordering that
-	// discovery.GroupByStack returns (running stacks first, stopped last).
+	// actions.StackGroupsFor returns stacks sorted running first, stopped last.
 	// A top-level sort by name would break that invariant and we'd lose
 	// CLI parity — stopped stacks would interleave with running ones.
 	hosts := slices.Sorted(maps.Keys(results))
@@ -376,7 +376,7 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
 			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
 		}
-		for _, st := range discovery.GroupByStack(host, res.Containers, hostCfg.Stacks) {
+		for _, st := range actions.StackGroupsFor(host, res.Containers, hostCfg.Stacks) {
 			out = append(out, stackRow{
 				host:    host,
 				name:    st.Name,
@@ -536,7 +536,7 @@ func (s *stacksScreen) openUnregisterPrompt() {
 		onYes: func() tea.Cmd {
 			removed, _, err := actions.UnregisterStacks(s.cfg, "", captured.host, captured.name)
 			if err != nil {
-				s.notice = "error: " + firstLineOf(err)
+				s.notice = "error: " + strutil.FirstLine(err.Error(), 40)
 			} else if len(removed) > 0 {
 				s.notice = fmt.Sprintf("Unregistered stack %q from %q", captured.name, captured.host)
 			}
@@ -560,7 +560,7 @@ func (s *stacksScreen) buildPurgeCmd() func() tea.Cmd {
 	return func() tea.Cmd {
 		steps, err := actions.PurgePlan(s.ctx, s.cfg, "", captured.host, captured.name)
 		if err != nil {
-			s.errors[key] = firstLineOf(err)
+			s.errors[key] = strutil.FirstLine(err.Error(), 40)
 			return nil
 		}
 		cmds := make([]tea.Cmd, 0, len(steps))

@@ -120,7 +120,7 @@ func runStacks(cmd *cobra.Command, gf *GlobalFlags) error {
 		if r.FromCache {
 			label += cachedIndicator(r.CachedAt)
 		}
-		all = append(all, discovery.GroupByStack(label, r.Containers, cfg.Hosts[name].Stacks)...)
+		all = append(all, actions.StackGroupsFor(label, r.Containers, cfg.Hosts[name].Stacks)...)
 	}
 
 	if len(all) == 0 {

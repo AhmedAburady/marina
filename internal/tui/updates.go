@@ -13,6 +13,7 @@ import (
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 type updatesPhase int
@@ -361,7 +362,7 @@ func (s *updatesScreen) viewDone(width, height int) string {
 	var lines []string
 	lines = append(lines, spacer(width))
 	if s.err != nil {
-		lines = append(lines, errorNote(width, firstLineOf(s.err)))
+		lines = append(lines, errorNote(width, strutil.FirstLine(s.err.Error(), 40)))
 		return panelLines(width, height, lines)
 	}
 	if s.appliedOk+s.appliedFail == 0 {

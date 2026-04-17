@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/docker/docker/api/types/container"
+
 	"github.com/AhmedAburady/marina/internal/config"
+	"github.com/AhmedAburady/marina/internal/discovery"
 	"github.com/AhmedAburady/marina/internal/docker"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 )
@@ -240,4 +243,12 @@ func ShellQuote(s string) string {
 		return ""
 	}
 	return "'" + s + "'"
+}
+
+// StackGroupsFor groups a host's running containers into stacks, merging in
+// any manually configured stacks from configStacks. It is a thin forwarder
+// over discovery.GroupByStack so that callers in commands/ and internal/tui/
+// do not need to import internal/discovery directly.
+func StackGroupsFor(host string, containers []container.Summary, configStacks map[string]string) []discovery.Stack {
+	return discovery.GroupByStack(host, containers, configStacks)
 }

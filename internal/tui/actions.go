@@ -8,6 +8,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/actions"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // ActionResultMsg is delivered to a screen's Update when an action finishes.
@@ -41,9 +42,9 @@ func DockerExecCmd(ctx context.Context, sshCfg internalssh.Config, command, kind
 		Log().Info("action.start", "kind", kind, "target", target, "host", sshCfg.Address, "cmd", command)
 		out, err := rawExec(ctx, sshCfg, command)
 		if err != nil {
-			Log().Warn("action.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 200))
+			Log().Warn("action.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 200))
 		} else {
-			Log().Info("action.ok", "kind", kind, "target", target, "out", firstChars(out, 200))
+			Log().Info("action.ok", "kind", kind, "target", target, "out", strutil.FirstLine(out, 200))
 		}
 		return ActionResultMsg{Kind: kind, Target: target, Output: out, Err: err}
 	}
@@ -60,22 +61,12 @@ func ComposeExecCmd(ctx context.Context, sshCfg internalssh.Config, dir, subCmd,
 		Log().Info("compose.start", "kind", kind, "target", target, "host", sshCfg.Address, "dir", dir, "sub", subCmd)
 		out, err := actions.ComposeOp(ctx, sshCfg, dir, subCmd)
 		if err != nil {
-			Log().Warn("compose.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", firstChars(out, 400))
+			Log().Warn("compose.fail", "kind", kind, "target", target, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 400))
 		} else {
-			Log().Info("compose.ok", "kind", kind, "target", target, "out", firstChars(out, 400))
+			Log().Info("compose.ok", "kind", kind, "target", target, "out", strutil.FirstLine(out, 400))
 		}
 		return ActionResultMsg{Kind: kind, Target: target, Output: out, Err: err}
 	}
-}
-
-// firstChars returns up to n runes of s — safe to log command output
-// snippets without bloating the audit log.
-func firstChars(s string, n int) string {
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n]) + "…"
 }
 
 // rawExec is a tiny ssh helper used by DockerExecCmd's free-form path. For

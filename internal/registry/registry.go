@@ -10,6 +10,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 )
 
 // sharedTransport is a package-level HTTP transport for all registry requests.
@@ -90,7 +91,11 @@ func CheckUpdate(ctx context.Context, imageRef string, localDigests []string) Ch
 	)
 	if err != nil {
 		result.Status = CheckFailed
-		result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)
+		if terr, ok := err.(*transport.Error); ok && terr.StatusCode == 429 {
+			result.Error = fmt.Errorf("%w: fetch remote digest for %q: %s", ErrRateLimited, imageRef, terr.Error())
+		} else {
+			result.Error = fmt.Errorf("fetch remote digest for %q: %w", imageRef, err)
+		}
 		return result
 	}
 	result.RemoteDigest = desc.Digest.String()

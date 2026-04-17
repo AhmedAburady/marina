@@ -15,6 +15,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/config"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // containerRow is one container line in the unified list.
@@ -174,7 +175,7 @@ func (s *containersScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	case ActionResultMsg:
 		delete(s.pending, msg.Target)
 		if msg.Err != nil {
-			s.errors[msg.Target] = firstLineOf(msg.Err)
+			s.errors[msg.Target] = strutil.FirstLine(msg.Err.Error(), 40)
 		} else {
 			delete(s.errors, msg.Target)
 			// Refresh container state after a successful action so status
@@ -204,7 +205,7 @@ func (s *containersScreen) View(width, height int) string {
 	if s.err != nil {
 		return panelLines(width, height, []string{
 			spacer(width),
-			errorNote(width, firstLineOf(s.err)),
+			errorNote(width, strutil.FirstLine(s.err.Error(), 40)),
 		})
 	}
 	if len(s.rows) == 0 {
@@ -341,7 +342,7 @@ func (s *containersScreen) buildRows(results map[string]HostFetchResult) {
 				stack:  "-",
 				name:   "(unreachable)",
 				image:  "",
-				status: firstLineOf(res.Err),
+				status: strutil.FirstLine(res.Err.Error(), 40),
 			})
 			continue
 		}

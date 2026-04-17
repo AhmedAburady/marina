@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -19,6 +20,7 @@ import (
 	notifyPkg "github.com/AhmedAburady/marina/internal/notify"
 	"github.com/AhmedAburady/marina/internal/registry"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
 )
@@ -260,7 +262,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 				for _, k := range hks {
 					report(w, fmt.Sprintf("  [%s] %s: updating…", host, k.Stack))
 					if err := runStackUpdateQuiet(cmd.Context(), cfg, k, stackDirs[k]); err != nil {
-						report(ew, fmt.Sprintf("  [%s] %s: FAILED — %v", host, k.Stack, firstLine(err)))
+						report(ew, fmt.Sprintf("  [%s] %s: FAILED — %v", host, k.Stack, strutil.FirstLine(err.Error(), 80)))
 						mu.Lock()
 						failures = append(failures, actions.HostStackErr{Host: k.Host, Stack: k.Stack, Err: err})
 						mu.Unlock()
@@ -300,7 +302,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes, stream bool) error
 					defer wg.Done()
 					report(w, fmt.Sprintf("  [%s] pruning…", host))
 					if err := runHostPruneQuiet(cmd.Context(), cfg, host); err != nil {
-						report(ew, fmt.Sprintf("  [%s] prune FAILED — %v", host, firstLine(err)))
+						report(ew, fmt.Sprintf("  [%s] prune FAILED — %v", host, strutil.FirstLine(err.Error(), 80)))
 						mu.Lock()
 						failures = append(failures, actions.HostStackErr{Host: host, Err: err})
 						mu.Unlock()
@@ -444,22 +446,6 @@ func runHostPruneQuiet(ctx context.Context, cfg *config.Config, host string) err
 	return actions.PruneHost(ctx, sshCfg, io.Discard)
 }
 
-// firstLine trims an error message to its first line, capped at 80 runes,
-// so one-liner status reports stay tidy.
-func firstLine(err error) string {
-	if err == nil {
-		return ""
-	}
-	s := err.Error()
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > 80 {
-		s = s[:79] + "…"
-	}
-	return s
-}
-
 // ── Check orchestration ──────────────────────────────────────────────────────
 
 // runChecks delegates to actions.RunChecks — the single shared implementation
@@ -533,10 +519,11 @@ func statusText(r registry.Result) string {
 	if r.Error == nil {
 		return "up-to-date"
 	}
+	if errors.Is(r.Error, registry.ErrRateLimited) {
+		return "rate limited"
+	}
 	msg := r.Error.Error()
 	switch {
-	case strings.Contains(msg, "TOOMANYREQUESTS"):
-		return "rate limited"
 	case strings.Contains(msg, "no registry digest"):
 		return "local build"
 	case strings.Contains(msg, "inspect container"),

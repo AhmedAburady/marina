@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/spinner"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // hostTestResultMsg carries the outcome of one SSH probe.
@@ -280,7 +280,10 @@ func (s *hostsScreen) statusCell(name string) string {
 	if st.ok {
 		return fmt.Sprintf("ok %s", st.latency.Round(time.Millisecond))
 	}
-	return firstLineOf(st.err)
+	if st.err == nil {
+		return ""
+	}
+	return strutil.FirstLine(st.err.Error(), 40)
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
@@ -350,7 +353,7 @@ func (s *hostsScreen) openDeletePrompt() {
 		onYes: func() tea.Cmd {
 			removed, _, err := actions.RemoveHosts(s.cfg, "", captured.Name)
 			if err != nil {
-				s.notice = "error: " + firstLineOf(err)
+				s.notice = "error: " + strutil.FirstLine(err.Error(), 40)
 			} else if len(removed) > 0 {
 				s.notice = fmt.Sprintf("Removed host %q", captured.Name)
 			}
@@ -437,18 +440,4 @@ func sumInts(v []int) int {
 		total += x
 	}
 	return total
-}
-
-func firstLineOf(err error) string {
-	if err == nil {
-		return ""
-	}
-	s := err.Error()
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
-	}
-	if len(s) > 40 {
-		s = s[:39] + "…"
-	}
-	return s
 }

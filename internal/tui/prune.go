@@ -14,6 +14,7 @@ import (
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	internalssh "github.com/AhmedAburady/marina/internal/ssh"
+	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
 // ── Scope ──────────────────────────────────────────────────────────────────
@@ -95,9 +96,9 @@ func pruneExecCmd(ctx context.Context, sshCfg internalssh.Config, host string, o
 		Log().Info("prune.start", "host", host, "cmd", actions.PruneCommand(opts))
 		out, err := actions.Prune(ctx, sshCfg, opts)
 		if err != nil {
-			Log().Warn("prune.fail", "host", host, "err", shortenErr(err, 200), "out", firstChars(out, 200))
+			Log().Warn("prune.fail", "host", host, "err", shortenErr(err, 200), "out", strutil.FirstLine(out, 200))
 		} else {
-			Log().Info("prune.ok", "host", host, "out", firstChars(out, 200))
+			Log().Info("prune.ok", "host", host, "out", strutil.FirstLine(out, 200))
 		}
 		return pruneDoneMsg{host: host, output: out, err: err}
 	}
@@ -342,7 +343,7 @@ func (s *pruneScreen) hostStatusCell(h string) string {
 	}
 	if r, ok := s.results[h]; ok {
 		if r.err != nil {
-			return "error: " + firstLineOf(r.err)
+			return "error: " + strutil.FirstLine(r.err.Error(), 40)
 		}
 		if r.reclaimed != "" {
 			return "freed " + r.reclaimed
