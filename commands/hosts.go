@@ -3,6 +3,7 @@ package commands
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,9 +92,10 @@ func newHostsToggleCmd(gf *GlobalFlags, verb, short string, disabled bool) *cobr
 
 func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 	var (
-		sshKey   string
-		trust    bool
-		noTrust  bool
+		sshKey  string
+		port    int
+		trust   bool
+		noTrust bool
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name> <address>",
@@ -101,10 +103,23 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 		Example: `  marina hosts add gmktec 10.0.0.50
   marina hosts add pve-arr user@10.0.0.51
   marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa
+  marina hosts add bastion user@10.0.0.70 -p 2222
   marina hosts add ci-box ci@10.0.0.60 --trust`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, raw := args[0], args[1]
+			// If --port is supplied and the address doesn't already carry
+			// one, tack it on. Lets users write `add myhost user@host -p 2222`
+			// without remembering the host:port syntax.
+			if port > 0 {
+				parsed, err := actions.ParseAddress(raw)
+				if err != nil {
+					return err
+				}
+				if _, existing := actions.SplitAddressPort(parsed.Address); existing == "" {
+					raw = actions.JoinUserAddress(parsed.User, actions.JoinHostPort(parsed.Address, port))
+				}
+			}
 			cfg, err := config.Load(gf.Config)
 			if err != nil {
 				return err
@@ -159,6 +174,7 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host")
+	cmd.Flags().IntVarP(&port, "port", "p", 0, "SSH port (default 22). Ignored if the address already contains :port")
 	cmd.Flags().BoolVar(&trust, "trust", false, "Trust the host key without prompting (scripts/CI)")
 	cmd.Flags().BoolVar(&noTrust, "no-trust", false, "Skip trusting the host key entirely")
 	return cmd
@@ -169,17 +185,19 @@ func newHostsEditCmd(gf *GlobalFlags) *cobra.Command {
 		address string
 		user    string
 		sshKey  string
+		port    int
 		enable  bool
 		disable bool
 	)
 	cmd := &cobra.Command{
 		Use:   "edit <name>",
 		Short: "Edit a remote Docker host",
-		Long: `Edit an existing host's address, user, SSH key, or enable/disable state.
+		Long: `Edit an existing host's address, user, SSH key, port, or enable/disable state.
 Only the flags you pass are changed; the rest are left alone.`,
 		Example: `  marina hosts edit gmktec --address 10.0.0.51
   marina hosts edit pve-arr --user admin
   marina hosts edit synology -k ~/.ssh/id_ed25519
+  marina hosts edit bastion -p 2222
   marina hosts edit ci-box --disable`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -200,13 +218,23 @@ Only the flags you pass are changed; the rest are left alone.`,
 			// Flag semantics: "not set" means "keep current value"; an
 			// explicitly empty string means "clear it". cobra's Changed()
 			// is the only way to distinguish the two.
+			curHost, curPortStr := actions.SplitAddressPort(h.Address)
+
 			newUser := h.User
 			if cmd.Flags().Changed("user") {
 				newUser = user
 			}
-			newAddress := h.Address
+			newHost := curHost
 			if cmd.Flags().Changed("address") {
-				newAddress = address
+				newHost = address
+			}
+			newPortStr := curPortStr
+			if cmd.Flags().Changed("port") {
+				if port == 0 {
+					newPortStr = ""
+				} else {
+					newPortStr = strconv.Itoa(port)
+				}
 			}
 			newKey := h.SSHKey
 			if cmd.Flags().Changed("key") {
@@ -220,6 +248,12 @@ Only the flags you pass are changed; the rest are left alone.`,
 				newDisabled = true
 			}
 
+			// Recombine host + port back into the canonical Address form.
+			// newPortStr is either "" (default SSH port) or a validated int.
+			newAddress := newHost
+			if newPortStr != "" {
+				newAddress = newHost + ":" + newPortStr
+			}
 			if err := actions.UpdateHost(cfg, gf.Config, name, actions.JoinUserAddress(newUser, newAddress), newKey, newDisabled); err != nil {
 				return err
 			}
@@ -227,7 +261,8 @@ Only the flags you pass are changed; the rest are left alone.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&address, "address", "a", "", "Host address (host[:port])")
+	cmd.Flags().StringVarP(&address, "address", "a", "", "Host address (host only — use --port for the port)")
+	cmd.Flags().IntVarP(&port, "port", "p", 0, "SSH port (0 = default 22)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "SSH user override (empty string clears)")
 	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path (empty string clears)")
 	cmd.Flags().BoolVar(&enable, "enable", false, "Enable this host")

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -99,6 +100,41 @@ func JoinUserAddress(user, address string) string {
 		return address
 	}
 	return user + "@" + address
+}
+
+// JoinHostPort returns the canonical "host[:port]" form stored in a host's
+// Address field. Port 0 (unset / SSH default) returns the host unchanged.
+// The inverse of splitHostPort.
+func JoinHostPort(host string, port int) string {
+	if port <= 0 {
+		return host
+	}
+	return host + ":" + strconv.Itoa(port)
+}
+
+// ParsePortStr turns a free-text UI port input into an int. An empty string
+// means "no port — use the SSH default" and returns 0. Out-of-range values
+// surface as errors so the caller (form, CLI) can show the user a hint.
+func ParsePortStr(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	p, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("port must be a number: %w", err)
+	}
+	if p < 1 || p > 65535 {
+		return 0, fmt.Errorf("port must be between 1 and 65535, got %d", p)
+	}
+	return p, nil
+}
+
+// SplitAddressPort breaks a host[:port] string back into its parts. Used
+// to pre-fill edit forms and CLI --port defaults. Returns ("", "") for
+// an empty input.
+func SplitAddressPort(addr string) (host, port string) {
+	return splitHostPort(addr)
 }
 
 // ParsedAddress is the output of ParseAddress: an optional user, a required

@@ -64,7 +64,9 @@ func (m *dashboard) Update(msg tea.Msg) (model tea.Model, cmd tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		return m, nil
+		// Force a full redraw to avoid the v2 Cursed Renderer ghosting old
+		// cells into the resized layout (bubbletea#1671).
+		return m, tea.ClearScreen
 
 	case PushScreenMsg:
 		m.stack = append(m.stack, msg.Screen)

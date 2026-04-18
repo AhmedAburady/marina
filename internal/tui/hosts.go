@@ -360,15 +360,14 @@ func (s *hostsScreen) statusCell(r actions.HostRow) string {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
-// openAddForm creates the inline add-host form. Four fields: name +
-// address (required), user + ssh key (optional). user and address are
-// split so each has its own labeled input — the address field carries
-// only the host[:port], and user is joined back before the actions layer
-// sees it.
+// openAddForm creates the inline add-host form. Address and port are split
+// into separate inputs so users typing a non-standard SSH port don't have
+// to remember the "host:port" syntax; the commit path recombines them.
 func (s *hostsScreen) openAddForm() {
 	s.form = newInlineForm("Add host", []formField{
 		newFormField("name", "short identifier", true),
 		newFormField("address", "host or IP", true),
+		newFormField("port", "blank for default (22)", false),
 		newFormField("user", "blank for global user", false),
 		newFormField("ssh key", "blank for global key", false),
 	})
@@ -380,9 +379,16 @@ func (s *hostsScreen) openAddForm() {
 func (s *hostsScreen) commitAdd() (string, error) {
 	name := s.form.Value(0)
 	address := s.form.Value(1)
-	user := s.form.Value(2)
-	key := s.form.Value(3)
-	if err := actions.AddHost(s.cfg, "", name, actions.JoinUserAddress(user, address), key); err != nil {
+	portStr := s.form.Value(2)
+	user := s.form.Value(3)
+	key := s.form.Value(4)
+
+	port, err := actions.ParsePortStr(portStr)
+	if err != nil {
+		return "", err
+	}
+	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
+	if err := actions.AddHost(s.cfg, "", name, raw, key); err != nil {
 		return "", err
 	}
 	s.notice = fmt.Sprintf("Added host %q", name)
@@ -400,9 +406,9 @@ func (s *hostsScreen) commitAdd() (string, error) {
 
 // openEditForm opens the edit-host dialog pre-filled with the current row's
 // values. Name is intentionally omitted from the form — renaming would
-// require re-keying the config map, which is out of scope here. Enabled /
-// Disabled is exposed as a pill toggle so the user can change state from
-// the same dialog that edits address / user / key.
+// require re-keying the config map, which is out of scope here. Port is
+// split out of the stored Address so non-standard ports are a first-class
+// field instead of a "host:port" string the user has to remember.
 func (s *hostsScreen) openEditForm() {
 	r := s.currentRow()
 	if r == nil {
@@ -412,16 +418,11 @@ func (s *hostsScreen) openEditForm() {
 	if !ok {
 		return
 	}
-	// Reconstruct the display-friendly address the user typed when adding —
-	// join user back in so the edit view looks like the input they'd supply
-	// via `marina hosts add`.
-	rawAddr := h.Address
-	if h.User != "" {
-		rawAddr = h.User + "@" + h.Address
-	}
+	host, port := actions.SplitAddressPort(h.Address)
 	s.editName = r.Name
 	s.form = newInlineForm(fmt.Sprintf("Edit host %q", r.Name), []formField{
-		newTextFieldWithValue("address", "host or IP", rawAddr, true),
+		newTextFieldWithValue("address", "host or IP", host, true),
+		newTextFieldWithValue("port", "blank for default (22)", port, false),
 		newTextFieldWithValue("user", "blank for global user", h.User, false),
 		newTextFieldWithValue("ssh key", "blank for global key", h.SSHKey, false),
 		newToggleField("status", "Enabled", "Disabled", !h.Disabled),
@@ -435,11 +436,17 @@ func (s *hostsScreen) openEditForm() {
 func (s *hostsScreen) commitEdit() error {
 	name := s.editName
 	address := s.form.Value(0)
-	user := s.form.Value(1)
-	key := s.form.Value(2)
-	enabled := s.form.BoolValue(3)
+	portStr := s.form.Value(1)
+	user := s.form.Value(2)
+	key := s.form.Value(3)
+	enabled := s.form.BoolValue(4)
 
-	if err := actions.UpdateHost(s.cfg, "", name, actions.JoinUserAddress(user, address), key, !enabled); err != nil {
+	port, err := actions.ParsePortStr(portStr)
+	if err != nil {
+		return err
+	}
+	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
+	if err := actions.UpdateHost(s.cfg, "", name, raw, key, !enabled); err != nil {
 		return err
 	}
 	s.notice = fmt.Sprintf("Updated host %q", name)
