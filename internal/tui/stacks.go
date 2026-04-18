@@ -151,7 +151,19 @@ func (s *stacksScreen) Help() string {
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · s start · x stop · r restart · p pull · u update · a add · d remove · P purge · R refresh · esc back"
+	return "↑/↓ move · / filter · s start · x stop · r restart · p pull · u update · c containers · a add · d remove · P purge · R refresh · esc back"
+}
+
+// openContainers pushes a Containers screen scoped to the selected stack's
+// host + compose project. No-op when the list is empty. Unlike the Hosts
+// screen's openContainers, a stopped stack is still a valid target — the
+// scoped view will just show stopped/exited containers for that project.
+func (s *stacksScreen) openContainers() tea.Cmd {
+	r := s.currentRow()
+	if r == nil {
+		return nil
+	}
+	return pushCmd(newContainersScreenForStack(s.ctx, s.cfg, r.host, r.name))
 }
 
 func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -238,6 +250,8 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openUnregisterPrompt()
 		case "P":
 			s.openPurgePrompt()
+		case "c":
+			return s, s.openContainers()
 		}
 
 	case HostFetchedMsg:

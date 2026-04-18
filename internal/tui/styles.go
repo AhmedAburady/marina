@@ -36,6 +36,7 @@ var (
 	cYellow = lipgloss.Color("#f1fa8c")
 	cRed    = lipgloss.Color("#ff6b6b")
 	cOrange = lipgloss.Color("#ffa657")
+	cPink   = lipgloss.Color("#ffc65d") // full-bleed host section header bg
 )
 
 // ── Chrome strips ───────────────────────────────────────────────────────────
@@ -75,7 +76,10 @@ var (
 				Foreground(cWhite).
 				Bold(true)
 
-	sHostHeader = lipgloss.NewStyle().Background(cBg).Foreground(cGreen).Bold(true)
+	// Host section header — a full-bleed vibrant-pink bar that clearly
+	// separates per-host groups in Containers / Stacks / Updates lists.
+	// Black bold text on hot pink reads as a strong label at a glance.
+	sHostHeader = lipgloss.NewStyle().Background(cPink).Foreground(cBg).Bold(true)
 
 	// Body text variants — all on cBg so adjacent rows concatenate seamlessly.
 	sMuted   = lipgloss.NewStyle().Background(cBg).Foreground(cDim)

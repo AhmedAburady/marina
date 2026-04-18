@@ -152,6 +152,15 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
+	// If path is a symlink (e.g. managed from a dotfiles repo), resolve it so
+	// the atomic rename swaps the underlying file rather than replacing the
+	// symlink with a regular file.
+	writePath := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		writePath = resolved
+		dir = filepath.Dir(resolved)
+	}
+
 	// Contract SSH key paths before writing so the file stays portable
 	// (~/... form) even though the in-memory config holds expanded paths.
 	toSave := *cfg
@@ -196,8 +205,8 @@ func Save(cfg *Config, path string) error {
 	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return fmt.Errorf("chmod temp config %s: %w", tmpName, err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp config to %s: %w", path, err)
+	if err := os.Rename(tmpName, writePath); err != nil {
+		return fmt.Errorf("rename temp config to %s: %w", writePath, err)
 	}
 	writeOK = true
 	return nil

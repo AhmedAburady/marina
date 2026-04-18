@@ -61,59 +61,74 @@ const (
 // containersScreen lists every container across every configured host, with
 // start/stop/restart/remove actions on the highlighted row.
 //
-// When `hostFilter` is non-empty, the screen scopes its fetch and display to
-// that single host — reached by pressing `c` on a row in the Hosts screen.
-// An empty hostFilter means "all enabled hosts" (the home-menu entry point).
+// Scoping (via the `hostFilter` / `stackFilter` fields):
+//   - both empty → the home-menu entry point: every container on every host
+//   - hostFilter only → reached by pressing `c` on a Hosts row: one host
+//   - hostFilter + stackFilter → reached by pressing `c` on a Stacks row:
+//     one host, one compose project. Narrows both the fetch scope (only
+//     that host is probed) and the display (only containers with that
+//     `com.docker.compose.project` label are shown).
 type containersScreen struct {
-	ctx        context.Context
-	cfg        *config.Config
-	hostFilter string         // "" = all hosts; otherwise the one host name we scope to
-	rows       []containerRow // unfiltered full list
-	visible    []containerRow // post-filter view — cursor + actions index into THIS
-	cursor     int            // position inside visible
-	loading    bool
-	err        error
-	pending    map[string]bool // container ID → action in-flight
-	errors     map[string]string
-	results    map[string]HostFetchResult // accumulated per-host results for streaming render
-	expected   int                        // number of HostFetchedMsg we await before clearing loading
-	received   int
-	spinner    spinner.Model
-	sb         scrollBody // viewport-backed scroll for long lists
-	mode       containersMode
-	prompt     *confirmPrompt
-	filter     filterBar
+	ctx         context.Context
+	cfg         *config.Config
+	hostFilter  string         // "" = all hosts; otherwise the one host we scope to
+	stackFilter string         // "" = all stacks; otherwise the one compose project
+	rows        []containerRow // unfiltered full list
+	visible     []containerRow // post-filter view — cursor + actions index into THIS
+	cursor      int            // position inside visible
+	loading     bool
+	err         error
+	pending     map[string]bool // container ID → action in-flight
+	errors      map[string]string
+	results     map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected    int                        // number of HostFetchedMsg we await before clearing loading
+	received    int
+	spinner     spinner.Model
+	sb          scrollBody // viewport-backed scroll for long lists
+	mode        containersMode
+	prompt      *confirmPrompt
+	filter      filterBar
 }
 
 func newContainersScreen(ctx context.Context, cfg *config.Config) *containersScreen {
-	return newContainersScreenScoped(ctx, cfg, "")
+	return newContainersScreenScoped(ctx, cfg, "", "")
 }
 
 // newContainersScreenForHost is the scoped constructor used when launching
 // from the Hosts screen — only the named host is fetched and listed.
 func newContainersScreenForHost(ctx context.Context, cfg *config.Config, host string) *containersScreen {
-	return newContainersScreenScoped(ctx, cfg, host)
+	return newContainersScreenScoped(ctx, cfg, host, "")
 }
 
-func newContainersScreenScoped(ctx context.Context, cfg *config.Config, host string) *containersScreen {
+// newContainersScreenForStack is the scoped constructor used when launching
+// from the Stacks screen — one host, one compose project.
+func newContainersScreenForStack(ctx context.Context, cfg *config.Config, host, stack string) *containersScreen {
+	return newContainersScreenScoped(ctx, cfg, host, stack)
+}
+
+func newContainersScreenScoped(ctx context.Context, cfg *config.Config, host, stack string) *containersScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 	return &containersScreen{
-		ctx:        ctx,
-		cfg:        cfg,
-		hostFilter: host,
-		loading:    true,
-		pending:    make(map[string]bool),
-		errors:     make(map[string]string),
-		results:    make(map[string]HostFetchResult),
-		spinner:    sp,
-		sb:         newScrollBody(),
-		filter:     newFilterBar(),
+		ctx:         ctx,
+		cfg:         cfg,
+		hostFilter:  host,
+		stackFilter: stack,
+		loading:     true,
+		pending:     make(map[string]bool),
+		errors:      make(map[string]string),
+		results:     make(map[string]HostFetchResult),
+		spinner:     sp,
+		sb:          newScrollBody(),
+		filter:      newFilterBar(),
 	}
 }
 
 func (s *containersScreen) Title() string {
-	if s.hostFilter != "" {
+	switch {
+	case s.hostFilter != "" && s.stackFilter != "":
+		return "Containers — " + s.hostFilter + " / " + s.stackFilter
+	case s.hostFilter != "":
 		return "Containers — " + s.hostFilter
 	}
 	return "Containers"
@@ -314,6 +329,13 @@ func (s *containersScreen) View(width, height int) string {
 		groups[gi].RowColors = colors[cursor : cursor+n]
 		cursor += n
 	}
+	// Stack-scoped view: append the compose project name to the host label
+	// so the section header reads "host — stack" instead of just "host".
+	if s.stackFilter != "" {
+		for gi := range groups {
+			groups[gi].Label = groups[gi].Label + " — " + s.stackFilter
+		}
+	}
 	content, cursorLine, headerLine := groupedLines(width,
 		[]string{"STACK", "CONTAINER", "IMAGE", "STATUS", "PORTS"},
 		widths, groups, s.cursor)
@@ -418,6 +440,12 @@ func (s *containersScreen) buildRows(results map[string]HostFetchResult) {
 func (s *containersScreen) rebuildVisible() {
 	s.visible = s.visible[:0]
 	for _, r := range s.rows {
+		// Stack-scoped view (launched from the Stacks screen) keeps only
+		// rows whose compose project matches. Containers with no compose
+		// label never match a non-empty stackFilter.
+		if s.stackFilter != "" && r.stack != s.stackFilter {
+			continue
+		}
 		if s.filter.Match(r.host, r.stack, r.name, r.image, r.status, r.ports) {
 			s.visible = append(s.visible, r)
 		}

@@ -78,10 +78,12 @@ func listRowColored(width int, cells []string, widths []int, rowIdx int, selecte
 	return panelLine(style, width, body)
 }
 
-// hostSection renders a bold-green "▸ hostname" label used above each
-// host's table in Containers / Stacks / Updates.
+// hostSection renders a full-width pink bar with the host (or "host —
+// stack") label, used above each host's table in Containers / Stacks /
+// Updates. The bar itself carries the visual weight, so no leading
+// chevron/arrow — just the padded label on the vibrant fill.
 func hostSection(width int, host string) string {
-	return panelLine(sHostHeader, width, pad(rowPadW)+"▸ "+host)
+	return panelLine(sHostHeader, width, pad(rowPadW)+host)
 }
 
 // spacer returns a blank row on the pure-black app background. Use between
