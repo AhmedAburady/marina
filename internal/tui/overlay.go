@@ -12,6 +12,10 @@ import (
 // composites the returned content over the screen's normal view via
 // lipgloss.Canvas + Compositor so it floats dead-centre with the list beneath
 // still visible.
+//
+// Architecture verified against the v2 upstream recommendation (maintainer
+// meowgorithm, bubbletea#1570 / bubbletea#642): Canvas + Layer + Compositor
+// is THE pattern for modals in v2 and is what Crush uses in production.
 
 type ModalProvider interface {
 	Modal() (content string, active bool)
@@ -39,47 +43,67 @@ func overlayModal(bg, modal string, width, height int) string {
 
 // ── Standard modal box ─────────────────────────────────────────────────────
 //
-// One lipgloss style — rounded teal border, pure-black interior (matches the
-// app background so nothing looks out of place), generous padding. Every
-// modal renders into this box and lets its inner components (textinput,
-// spinner) render with their default styles.
+// Bright purple surface on black body. No border — the contrast between the
+// modal's cAccent fill and the dashboard's cBg body is what makes the popup
+// "pop". Default text is black for maximum readability against the purple
+// fill. See docs/Styling.md §5.4 (cards) and §A6 (explicit backgrounds).
 
 var modalBox = lipgloss.NewStyle().
-	Border(lipgloss.NormalBorder()).
-	BorderForeground(cTeal).
-	Background(cBg).
-	Foreground(cFg).
-	Padding(1, 2)
+	Background(cAccent).
+	Foreground(cBg).
+	Padding(1, 3)
 
-// Inner text styles — foreground-only on top of modalBox's cBg fill.
+// cAccentSoft is a light lavender used for the help/muted line inside a
+// purple modal — it reads quieter than full black but stays legible.
+var cAccentSoft = lipgloss.Color("#E8DFFF")
+
+// cAccentFaint is a washed-out lavender that sits close to the modal fill
+// so it reads as "faded ghost text" — used for input placeholders.
+var cAccentFaint = lipgloss.Color("#564a77ff")
+
+// Inner text styles — every style carries modalBox's cAccent fill explicitly
+// so inner ANSI resets never punch holes in the modal surface.
 var (
-	sDialogTitle = lipgloss.NewStyle().Foreground(cTeal).Bold(true)
-	sDialogLabel = lipgloss.NewStyle().Foreground(cDim)
-	sDialogFocus = lipgloss.NewStyle().Foreground(cTeal).Bold(true)
-	sDialogErr   = lipgloss.NewStyle().Foreground(cRed).Bold(true)
-	sDialogHelp  = lipgloss.NewStyle().Foreground(cDim)
-	sDialogDim   = lipgloss.NewStyle().Foreground(cDim)
+	sDialogTitle = lipgloss.NewStyle().Background(cAccent).Foreground(cBg).Bold(true)
+	// Blurred label uses a softer lavender so focused labels clearly stand
+	// out in bold black. No underline, no arrow prefix — alignment between
+	// label and input must be preserved.
+	sDialogLabel = lipgloss.NewStyle().Background(cAccent).Foreground(cAccentSoft)
+	sDialogFocus = lipgloss.NewStyle().Background(cAccent).Foreground(cBg).Bold(true)
+	sDialogErr   = lipgloss.NewStyle().Background(cAccent).Foreground(cYellow).Bold(true)
+	sDialogHelp  = lipgloss.NewStyle().Background(cAccent).Foreground(cAccentSoft)
+	sDialogDim   = lipgloss.NewStyle().Background(cAccent).Foreground(cBg)
+
+	// Styles used by the manual-render path for blurred inputs. Inputs now
+	// sit flush on the modal's purple surface — no dark well. Value text is
+	// black for contrast; placeholder is soft lavender (italic) so it reads
+	// as a hint. A blurred textinput.View() always appends its virtualCursor
+	// whose TextStyle is zero-valued → 1-cell bg reset; we bypass View()
+	// when blurred and render the value ourselves. See docs/Styling.md §A3.
+	sDialogInputValue  = lipgloss.NewStyle().Background(cAccent).Foreground(cBg)
+	sDialogInputPlace  = lipgloss.NewStyle().Background(cAccent).Foreground(cAccentFaint).Italic(true)
+	sDialogInputFiller = lipgloss.NewStyle().Background(cAccent)
+	// sDialogGap fills bare separator cells between styled spans inside
+	// modalBox so the cAccent fill stays continuous across the row.
+	sDialogGap = lipgloss.NewStyle().Background(cAccent)
 )
 
 // renderFormModal assembles a standard labeled-input dialog:
 //
-//	Title
-//	                                             <blank>
-//	label                                            (bold teal when focused)
-//	<input>                                          (textinput default render)
-//	                                                 <blank>
-//	...
-//	error (if any)
-//	help
+//	Title                                         (black bold on purple)
 //
-// All inputs render with bubbles/v2 textinput's default styling. Focus is
-// indicated by the label going bold+teal instead of dim.
+//	label                                         (black bold underlined when focused)
+//	<input>                                       (dark well with light text)
+//
+//	...
+//	error (if any)                                (yellow bold)
+//	help                                          (soft lavender)
 func renderFormModal(title string, fields []formField, focus int, errMsg, help string) string {
 	const inputWidth = 44
 
 	var rows []string
 	rows = append(rows, sDialogTitle.Render(title))
-	rows = append(rows, "")
+	rows = append(rows, sDialogGap.Render(""))
 
 	for i, f := range fields {
 		label := f.label
@@ -91,22 +115,19 @@ func renderFormModal(title string, fields []formField, focus int, errMsg, help s
 			style = sDialogFocus
 		}
 		rows = append(rows, style.Render(label))
-
-		ti := f.input
-		ti.SetWidth(inputWidth)
-		rows = append(rows, ti.View())
+		rows = append(rows, inputRow(f, i == focus, inputWidth))
 
 		if i < len(fields)-1 {
-			rows = append(rows, "")
+			rows = append(rows, sDialogGap.Render(""))
 		}
 	}
 
 	if errMsg != "" {
-		rows = append(rows, "")
+		rows = append(rows, sDialogGap.Render(""))
 		rows = append(rows, sDialogErr.Render(errMsg))
 	}
 	if help != "" {
-		rows = append(rows, "")
+		rows = append(rows, sDialogGap.Render(""))
 		rows = append(rows, sDialogHelp.Render(help))
 	}
 
@@ -119,40 +140,86 @@ func renderFormModal(title string, fields []formField, focus int, errMsg, help s
 func renderConfirmModal(title string, details []string, confirmLabel string, focus int) string {
 	var rows []string
 	rows = append(rows, sDialogTitle.Render(title))
-	rows = append(rows, "")
+	rows = append(rows, sDialogGap.Render(""))
 	for _, d := range details {
 		rows = append(rows, sDialogDim.Render(d))
 	}
-	rows = append(rows, "")
+	rows = append(rows, sDialogGap.Render(""))
 
-	btns := renderPill("Cancel", focus == 0) + "  " + renderPill(confirmLabel, focus == 1)
+	btns := renderPill("Cancel", focus == 0) + sDialogGap.Render("  ") + renderPill(confirmLabel, focus == 1)
 	rows = append(rows, btns)
-	rows = append(rows, "")
+	rows = append(rows, sDialogGap.Render(""))
 	rows = append(rows, sDialogHelp.Render("←/→ select  ·  enter confirm  ·  esc cancel"))
 
 	return modalBox.Render(strings.Join(rows, "\n"))
 }
 
 // renderSpinnerModal renders a tiny centred "operation in progress" dialog:
-// one line with the bubbles spinner and a bold teal label.
+// one line with the bubbles spinner and a bold black label on the purple
+// surface.
 func renderSpinnerModal(spinner, title string) string {
-	body := spinner + "  " + sDialogTitle.Render(title)
+	body := spinner + sDialogGap.Render("  ") + sDialogTitle.Render(title)
 	return modalBox.Render(body)
 }
 
-// renderPill renders one button in the confirm dialog. Focused pill is the
-// accent purple; idle pill is dim text on the modal's black bg.
+// inputRow renders one form input as a single seamless dark well on the
+// purple modal surface.
+//
+//   - Focused: the bubbles textinput renders itself so typing and the live
+//     cursor work. Its styles are configured for the dark well.
+//   - Blurred: the value is rendered manually (bypassing View()) to avoid
+//     v2's virtualCursor bg-leak bug. The well is padded to the full input
+//     width so every blurred input is the same rectangle as a focused one.
+//
+// See docs/Styling.md §A3 — this mirrors the settings.valueRow pattern.
+func inputRow(f formField, focused bool, width int) string {
+	if focused {
+		ti := f.input
+		ti.SetWidth(width)
+		st := ti.Styles()
+		st.Focused.Text = sDialogInputValue
+		st.Focused.Placeholder = sDialogInputPlace
+		st.Blurred.Text = sDialogInputValue
+		st.Blurred.Placeholder = sDialogInputPlace
+		st.Cursor.Color = cTeal
+		ti.SetStyles(st)
+		return ti.View()
+	}
+
+	// Blurred — manual render. The well width includes the value/placeholder
+	// plus trailing filler so every row is the same rectangle.
+	value := f.input.Value()
+	var head string
+	if value == "" {
+		head = sDialogInputPlace.Render(f.placeholder)
+	} else {
+		head = sDialogInputValue.Render(value)
+	}
+	headW := lipgloss.Width(head)
+	if headW >= width {
+		return head
+	}
+	return head + sDialogInputFiller.Render(strings.Repeat(" ", width-headW))
+}
+
+// renderPill renders one button in the confirm dialog.
+//
+//   - Focused: inverted — black fill with purple bold text, so the active
+//     button pops out of the modal's purple surface like a pressed button.
+//   - Idle: flat on the modal (same cAccent bg), black text. No visible
+//     border — affordance comes purely from the padding + focused state.
 func renderPill(label string, focused bool) string {
 	if focused {
 		return lipgloss.NewStyle().
-			Background(cAccent).
-			Foreground(cWhite).
+			Background(cBg).
+			Foreground(cAccent).
 			Bold(true).
 			Padding(0, 2).
 			Render(label)
 	}
 	return lipgloss.NewStyle().
-		Foreground(cDim).
+		Background(cAccent).
+		Foreground(cBg).
 		Padding(0, 2).
 		Render(label)
 }

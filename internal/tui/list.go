@@ -114,8 +114,14 @@ func mutedLine(width int, text string) string {
 // summaryLine — used by Updates for the "N update(s) available · showing
 // all" strip above the list. Same indent as data rows so everything lines
 // up vertically.
+//
+// Both the gap and the meta span carry sSuccess's cBg fill explicitly so
+// the row stays seamless — a bare "    " between the plain bold text and
+// sMuted's inner render would terminate sSuccess's fill mid-row (see
+// docs/Styling.md §A1).
 func summaryLine(width int, bold, meta string) string {
-	return panelLine(sSuccess, width, pad(rowPadW)+bold+"    "+sMuted.Render(meta))
+	gap := sSuccess.Render("    ")
+	return panelLine(sSuccess, width, pad(rowPadW)+bold+gap+sMuted.Render(meta))
 }
 
 // ── Grouped list assembly ─────────────────────────────────────────────────

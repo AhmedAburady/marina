@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/spf13/cobra"
 )
@@ -84,10 +85,17 @@ func newConfigSetCmd(gf *GlobalFlags) *cobra.Command {
 		Long: `Set a global config value.
 
 Available keys:
-  username    Global default SSH username for all hosts
-  ssh_key     Global default SSH key path`,
+  username             Global default SSH username for all hosts
+  ssh_key              Global default SSH key path (tilde and $VAR expanded on load)
+  prune_after_update   Auto-prune after update: true or false
+  gotify.url           Gotify server URL
+  gotify.token         Gotify app token (plaintext; prefer gotify.token_env)
+  gotify.priority      Gotify notification priority (integer)`,
 		Example: `  marina config set username myuser
-  marina config set ssh_key ~/.ssh/id_ed25519`,
+  marina config set ssh_key ~/.ssh/id_ed25519
+  marina config set prune_after_update true
+  marina config set gotify.url https://notify.example.com
+  marina config set gotify.priority 5`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key, value := args[0], args[1]
@@ -97,20 +105,15 @@ Available keys:
 				return err
 			}
 
-			switch key {
-			case "username":
-				cfg.Settings.Username = value
-			case "ssh_key":
-				cfg.Settings.SSHKey = value
-			default:
-				return fmt.Errorf("unknown config key %q (supported: username, ssh_key)", key)
+			if err := actions.SetConfigKey(cfg, key, value); err != nil {
+				return err
 			}
 
 			if err := config.Save(cfg, gf.Config); err != nil {
 				return err
 			}
 
-			cmd.Printf("%s has been set successfully to %q\n", key, value)
+			cmd.Printf("%s has been set to %q\n", key, value)
 			return nil
 		},
 	}

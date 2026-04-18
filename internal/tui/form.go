@@ -23,6 +23,11 @@ type formField struct {
 func newFormField(label, placeholder string, required bool) formField {
 	ti := textinput.New()
 	ti.Placeholder = placeholder
+	// No prompt — the label above each input is the only affordance we use.
+	// Leaving the default "> " would both shift the input's x-origin
+	// (breaking alignment with the label) and render in a colour that
+	// doesn't match the dark input well.
+	ti.Prompt = ""
 	return formField{
 		label:       label,
 		placeholder: placeholder,
