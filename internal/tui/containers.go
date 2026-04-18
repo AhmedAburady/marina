@@ -60,43 +60,64 @@ const (
 
 // containersScreen lists every container across every configured host, with
 // start/stop/restart/remove actions on the highlighted row.
+//
+// When `hostFilter` is non-empty, the screen scopes its fetch and display to
+// that single host — reached by pressing `c` on a row in the Hosts screen.
+// An empty hostFilter means "all enabled hosts" (the home-menu entry point).
 type containersScreen struct {
-	ctx      context.Context
-	cfg      *config.Config
-	rows     []containerRow // unfiltered full list
-	visible  []containerRow // post-filter view — cursor + actions index into THIS
-	cursor   int            // position inside visible
-	loading  bool
-	err      error
-	pending  map[string]bool // container ID → action in-flight
-	errors   map[string]string
-	results  map[string]HostFetchResult // accumulated per-host results for streaming render
-	expected int                        // number of HostFetchedMsg we await before clearing loading
-	received int
-	spinner  spinner.Model
-	sb       scrollBody // viewport-backed scroll for long lists
-	mode     containersMode
-	prompt   *confirmPrompt
-	filter   filterBar
+	ctx        context.Context
+	cfg        *config.Config
+	hostFilter string         // "" = all hosts; otherwise the one host name we scope to
+	rows       []containerRow // unfiltered full list
+	visible    []containerRow // post-filter view — cursor + actions index into THIS
+	cursor     int            // position inside visible
+	loading    bool
+	err        error
+	pending    map[string]bool // container ID → action in-flight
+	errors     map[string]string
+	results    map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected   int                        // number of HostFetchedMsg we await before clearing loading
+	received   int
+	spinner    spinner.Model
+	sb         scrollBody // viewport-backed scroll for long lists
+	mode       containersMode
+	prompt     *confirmPrompt
+	filter     filterBar
 }
 
 func newContainersScreen(ctx context.Context, cfg *config.Config) *containersScreen {
+	return newContainersScreenScoped(ctx, cfg, "")
+}
+
+// newContainersScreenForHost is the scoped constructor used when launching
+// from the Hosts screen — only the named host is fetched and listed.
+func newContainersScreenForHost(ctx context.Context, cfg *config.Config, host string) *containersScreen {
+	return newContainersScreenScoped(ctx, cfg, host)
+}
+
+func newContainersScreenScoped(ctx context.Context, cfg *config.Config, host string) *containersScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 	return &containersScreen{
-		ctx:     ctx,
-		cfg:     cfg,
-		loading: true,
-		pending: make(map[string]bool),
-		errors:  make(map[string]string),
-		results: make(map[string]HostFetchResult),
-		spinner: sp,
-		sb:      newScrollBody(),
-		filter:  newFilterBar(),
+		ctx:        ctx,
+		cfg:        cfg,
+		hostFilter: host,
+		loading:    true,
+		pending:    make(map[string]bool),
+		errors:     make(map[string]string),
+		results:    make(map[string]HostFetchResult),
+		spinner:    sp,
+		sb:         newScrollBody(),
+		filter:     newFilterBar(),
 	}
 }
 
-func (s *containersScreen) Title() string { return "Containers" }
+func (s *containersScreen) Title() string {
+	if s.hostFilter != "" {
+		return "Containers — " + s.hostFilter
+	}
+	return "Containers"
+}
 
 func (s *containersScreen) Init() tea.Cmd {
 	hosts := s.startFetch()
@@ -106,10 +127,12 @@ func (s *containersScreen) Init() tea.Cmd {
 	)
 }
 
-// startFetch resets per-host streaming state and returns the enabled hosts map
-// so callers can pass it directly to FetchAllHostsCmd without a second lookup.
+// startFetch resets per-host streaming state and returns the hosts map so
+// callers can pass it directly to FetchAllHostsCmd. When the screen is
+// scoped to one host via hostFilter, the returned map is narrowed to that
+// single entry; otherwise it's every enabled host.
 func (s *containersScreen) startFetch() map[string]*config.HostConfig {
-	hosts := actions.EnabledHosts(s.cfg)
+	hosts := scopedHosts(s.cfg, s.hostFilter)
 	s.results = make(map[string]HostFetchResult, len(hosts))
 	s.expected = len(hosts)
 	s.received = 0

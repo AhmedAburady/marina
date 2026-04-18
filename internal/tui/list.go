@@ -5,6 +5,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/AhmedAburady/marina/internal/actions"
+	"github.com/AhmedAburady/marina/internal/config"
 )
 
 // ── List rendering ─────────────────────────────────────────────────────────
@@ -230,6 +233,25 @@ func viewportBody(
 	}
 	rendered := sb.View(width, height, content, cursorLine, headerLine)
 	return strings.Split(rendered, "\n")
+}
+
+// scopedHosts returns the hosts map a fan-out screen should fetch from.
+// An empty hostFilter means "every enabled host" (the default home-menu
+// entry point). A non-empty hostFilter narrows the set to that single
+// host — used when a list screen is launched scoped from the Hosts
+// screen (press `c` for Containers or `s` for Stacks on a row).
+//
+// When the filter names a host that doesn't exist or is disabled, the
+// returned map is empty and the screen will render its empty state.
+func scopedHosts(cfg *config.Config, hostFilter string) map[string]*config.HostConfig {
+	all := actions.EnabledHosts(cfg)
+	if hostFilter == "" {
+		return all
+	}
+	if h, ok := all[hostFilter]; ok {
+		return map[string]*config.HostConfig{hostFilter: h}
+	}
+	return map[string]*config.HostConfig{}
 }
 
 // ── Action-state helpers ──────────────────────────────────────────────────

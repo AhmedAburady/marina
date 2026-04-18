@@ -102,7 +102,7 @@ func (s *hostsScreen) Help() string {
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · t test · u trust · x disable · a add · e edit · d delete · R refresh · esc back"
+	return "↑/↓ move · / filter · t test · u trust · c containers · s stacks · x disable · a add · e edit · d delete · R refresh · esc back"
 }
 
 func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -210,6 +210,10 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openDeletePrompt()
 		case "x":
 			s.toggleDisabled()
+		case "c":
+			return s, s.openContainers()
+		case "s":
+			return s, s.openStacks()
 		}
 
 	case hostTestResultMsg:
@@ -458,6 +462,28 @@ func (s *hostsScreen) commitEdit() error {
 		}
 	}
 	return nil
+}
+
+// openContainers pushes a Containers screen scoped to the host under the
+// cursor. Returns nil (no-op) when the list is empty or the host is
+// disabled — a scoped view of a disabled host would only show an empty
+// state, which isn't useful. The user can enable it with `x` first.
+func (s *hostsScreen) openContainers() tea.Cmd {
+	r := s.currentRow()
+	if r == nil || r.Disabled {
+		return nil
+	}
+	return pushCmd(newContainersScreenForHost(s.ctx, s.cfg, r.Name))
+}
+
+// openStacks pushes a Stacks screen scoped to the host under the cursor.
+// Same disabled-host guard as openContainers.
+func (s *hostsScreen) openStacks() tea.Cmd {
+	r := s.currentRow()
+	if r == nil || r.Disabled {
+		return nil
+	}
+	return pushCmd(newStacksScreenForHost(s.ctx, s.cfg, r.Name))
 }
 
 // openTrustPrompt stages a post-add confirm modal asking the user whether
