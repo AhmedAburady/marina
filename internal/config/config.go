@@ -152,7 +152,19 @@ func Save(cfg *Config, path string) error {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
-	data, err := yaml.Marshal(cfg)
+	// Contract SSH key paths before writing so the file stays portable
+	// (~/... form) even though the in-memory config holds expanded paths.
+	toSave := *cfg
+	toSave.Settings.SSHKey = ContractPath(cfg.Settings.SSHKey)
+	hostsCopy := make(map[string]*HostConfig, len(cfg.Hosts))
+	for k, v := range cfg.Hosts {
+		hc := *v
+		hc.SSHKey = ContractPath(v.SSHKey)
+		hostsCopy[k] = &hc
+	}
+	toSave.Hosts = hostsCopy
+
+	data, err := yaml.Marshal(&toSave)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
 	}
@@ -189,6 +201,27 @@ func Save(cfg *Config, path string) error {
 	}
 	writeOK = true
 	return nil
+}
+
+// ContractPath replaces the user's home directory prefix with "~/".
+// It is the symmetric inverse of expandPath and is used when writing config
+// files so that SSH key paths stay portable (~/... form) rather than
+// hard-coding the current user's home directory.
+func ContractPath(p string) string {
+	if p == "" {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return p
+	}
+	if p == home {
+		return "~"
+	}
+	if strings.HasPrefix(p, home+string(filepath.Separator)) {
+		return "~/" + p[len(home)+1:]
+	}
+	return p
 }
 
 // expandPath expands environment variables and a leading tilde in p.

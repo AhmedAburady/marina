@@ -17,20 +17,30 @@ import (
 
 // hostTestResultMsg carries the outcome of one SSH probe.
 type hostTestResultMsg struct {
-	host    string
-	ok      bool
-	latency time.Duration
-	err     error
+	host      string
+	ok        bool
+	latency   time.Duration
+	err       error
+	untrusted bool
+}
+
+// hostTrustResultMsg carries the outcome of one TrustHost attempt. A
+// successful trust is always followed by a test probe so the user sees the
+// row transition from "untrusted" to "ok" in one action.
+type hostTrustResultMsg struct {
+	host string
+	err  error
 }
 
 // hostTestState holds the transient test status for one row. `pending` is
 // true while the probe is in flight; `done` + `ok`/`err` carry the result.
 type hostTestState struct {
-	pending bool
-	done    bool
-	ok      bool
-	latency time.Duration
-	err     error
+	pending   bool
+	done      bool
+	ok        bool
+	latency   time.Duration
+	err       error
+	untrusted bool
 }
 
 // hostsMode toggles between the plain list and the inline add / confirm
@@ -40,25 +50,28 @@ type hostsMode int
 const (
 	hostsModeList hostsMode = iota
 	hostsModeAdd
+	hostsModeEdit
 	hostsModeConfirmDelete
+	hostsModeConfirmTrust
 )
 
 // hostsScreen is the "Hosts" destination: list, test, add, remove.
 type hostsScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	rows    []actions.HostRow // unfiltered
-	visible []actions.HostRow // post-filter — cursor + actions index into this
-	cursor  int
-	states  map[string]*hostTestState
-	pending int
-	spinner spinner.Model
-	mode    hostsMode
-	form    *inlineForm
-	prompt  *confirmPrompt
-	filter  filterBar
-	notice  string
-	sb      scrollBody
+	ctx      context.Context
+	cfg      *config.Config
+	rows     []actions.HostRow // unfiltered
+	visible  []actions.HostRow // post-filter — cursor + actions index into this
+	cursor   int
+	states   map[string]*hostTestState
+	pending  int
+	spinner  spinner.Model
+	mode     hostsMode
+	form     *inlineForm
+	editName string // host name captured when the edit form was opened
+	prompt   *confirmPrompt
+	filter   filterBar
+	notice   string
+	sb       scrollBody
 }
 
 func newHostsScreen(ctx context.Context, cfg *config.Config) *hostsScreen {
@@ -81,15 +94,15 @@ func (s *hostsScreen) Init() tea.Cmd         { return nil }
 
 func (s *hostsScreen) Help() string {
 	switch s.mode {
-	case hostsModeAdd:
-		return "tab move · enter save · esc cancel"
-	case hostsModeConfirmDelete:
+	case hostsModeAdd, hostsModeEdit:
+		return "tab move · space toggle · enter save · esc cancel"
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		return "←/→ select · enter confirm · esc cancel"
 	}
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · t test · x disable · a add · d delete · R refresh · esc back"
+	return "↑/↓ move · / filter · t test · u trust · c containers · s stacks · x disable · a add · e edit · d delete · R refresh · esc back"
 }
 
 func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -103,16 +116,46 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 				s.mode = hostsModeList
 				s.form = nil
 			case submit:
-				if err := s.commitAdd(); err != nil {
+				name, err := s.commitAdd()
+				if err != nil {
+					s.form.err = err.Error()
+					return s, cmd
+				}
+				s.form = nil
+				// If the host already has a key in known_hosts (user added
+				// it manually before, or it was added for another marina
+				// host with the same address), skip the trust prompt and go
+				// straight to the list. `u` is still available for manual
+				// re-trust attempts.
+				if trusted, _ := actions.IsHostTrusted(s.ctx, s.cfg, name); trusted {
+					s.mode = hostsModeList
+					return s, cmd
+				}
+				s.openTrustPrompt(name)
+				return s, cmd
+			}
+			return s, cmd
+		}
+	case hostsModeEdit:
+		if s.form != nil {
+			submit, cancel, cmd := s.form.Update(msg)
+			switch {
+			case cancel:
+				s.mode = hostsModeList
+				s.form = nil
+				s.editName = ""
+			case submit:
+				if err := s.commitEdit(); err != nil {
 					s.form.err = err.Error()
 					return s, cmd
 				}
 				s.mode = hostsModeList
 				s.form = nil
+				s.editName = ""
 			}
 			return s, cmd
 		}
-	case hostsModeConfirmDelete:
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		if s.prompt != nil {
 			done, cmd := s.prompt.Update(msg)
 			if done {
@@ -159,10 +202,18 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.refresh()
 		case "a":
 			s.openAddForm()
+		case "e":
+			s.openEditForm()
+		case "u":
+			return s, s.trustCurrent()
 		case "d":
 			s.openDeletePrompt()
 		case "x":
 			s.toggleDisabled()
+		case "c":
+			return s, s.openContainers()
+		case "s":
+			return s, s.openStacks()
 		}
 
 	case hostTestResultMsg:
@@ -179,6 +230,21 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		st.ok = msg.ok
 		st.latency = msg.latency
 		st.err = msg.err
+		st.untrusted = msg.untrusted
+
+	case hostTrustResultMsg:
+		if msg.err != nil {
+			s.notice = fmt.Sprintf("trust %q: %s", msg.host, strutil.FirstLine(msg.err.Error(), 60))
+			return s, nil
+		}
+		s.notice = fmt.Sprintf("Trusted %q", msg.host)
+		// Clear any stale untrusted state and chain an immediate test probe
+		// so the row transitions from "untrusted — press u" to the real
+		// connection status without requiring another keypress.
+		delete(s.states, msg.host)
+		s.states[msg.host] = &hostTestState{pending: true}
+		s.pending++
+		return s, tea.Batch(hostTestCmd(s.ctx, s.cfg, msg.host), s.spinner.Tick)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -198,16 +264,17 @@ func (s *hostsScreen) View(width, height int) string {
 	return s.viewList(width, height)
 }
 
-// Modal implements ModalProvider. When an add-host or delete-confirm flow
-// is open, the dashboard overlays this string over the list view.
+// Modal implements ModalProvider. When an add-host, edit-host, or
+// delete-confirm flow is open, the dashboard overlays this string over
+// the list view.
 func (s *hostsScreen) Modal() (string, bool) {
 	switch s.mode {
-	case hostsModeAdd:
+	case hostsModeAdd, hostsModeEdit:
 		if s.form == nil {
 			return "", false
 		}
 		return s.form.Modal(), true
-	case hostsModeConfirmDelete:
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		if s.prompt == nil {
 			return "", false
 		}
@@ -289,40 +356,44 @@ func (s *hostsScreen) statusCell(r actions.HostRow) string {
 	if st.ok {
 		return fmt.Sprintf("ok %s", st.latency.Round(time.Millisecond))
 	}
+	if st.untrusted {
+		return "untrusted — press u"
+	}
 	return "unreachable"
 }
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
-// openAddForm creates the inline add-host form. Four fields: name +
-// address (required), user + ssh key (optional). user and address are
-// split so each has its own labeled input — the address field carries
-// only the host[:port], and user is joined back before the actions layer
-// sees it.
+// openAddForm creates the inline add-host form. Address and port are split
+// into separate inputs so users typing a non-standard SSH port don't have
+// to remember the "host:port" syntax; the commit path recombines them.
 func (s *hostsScreen) openAddForm() {
 	s.form = newInlineForm("Add host", []formField{
 		newFormField("name", "short identifier", true),
 		newFormField("address", "host or IP", true),
+		newFormField("port", "blank for default (22)", false),
 		newFormField("user", "blank for global user", false),
 		newFormField("ssh key", "blank for global key", false),
 	})
 	s.mode = hostsModeAdd
 }
 
-func (s *hostsScreen) commitAdd() error {
+// commitAdd persists the add-form values as a new host entry. Returns the
+// host name so the caller can chain follow-up commands (e.g. auto-trust).
+func (s *hostsScreen) commitAdd() (string, error) {
 	name := s.form.Value(0)
 	address := s.form.Value(1)
-	user := s.form.Value(2)
-	key := s.form.Value(3)
-	// Join user + address into the "user@host" form ParseAddress expects.
-	// When user is blank, ParseAddress accepts the bare host and the global
-	// default kicks in at SSH dial time.
-	raw := address
-	if user != "" {
-		raw = user + "@" + address
+	portStr := s.form.Value(2)
+	user := s.form.Value(3)
+	key := s.form.Value(4)
+
+	port, err := actions.ParsePortStr(portStr)
+	if err != nil {
+		return "", err
 	}
+	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
 	if err := actions.AddHost(s.cfg, "", name, raw, key); err != nil {
-		return err
+		return "", err
 	}
 	s.notice = fmt.Sprintf("Added host %q", name)
 	s.refresh()
@@ -334,7 +405,112 @@ func (s *hostsScreen) commitAdd() error {
 			break
 		}
 	}
+	return name, nil
+}
+
+// openEditForm opens the edit-host dialog pre-filled with the current row's
+// values. Name is intentionally omitted from the form — renaming would
+// require re-keying the config map, which is out of scope here. Port is
+// split out of the stored Address so non-standard ports are a first-class
+// field instead of a "host:port" string the user has to remember.
+func (s *hostsScreen) openEditForm() {
+	r := s.currentRow()
+	if r == nil {
+		return
+	}
+	h, ok := s.cfg.Hosts[r.Name]
+	if !ok {
+		return
+	}
+	host, port := actions.SplitAddressPort(h.Address)
+	s.editName = r.Name
+	s.form = newInlineForm(fmt.Sprintf("Edit host %q", r.Name), []formField{
+		newTextFieldWithValue("address", "host or IP", host, true),
+		newTextFieldWithValue("port", "blank for default (22)", port, false),
+		newTextFieldWithValue("user", "blank for global user", h.User, false),
+		newTextFieldWithValue("ssh key", "blank for global key", h.SSHKey, false),
+		newToggleField("status", "Enabled", "Disabled", !h.Disabled),
+	})
+	s.mode = hostsModeEdit
+}
+
+// commitEdit applies the form values through actions.UpdateHost. The host
+// name was captured at openEditForm time, so cursor movement while the
+// dialog is open doesn't affect which host gets updated.
+func (s *hostsScreen) commitEdit() error {
+	name := s.editName
+	address := s.form.Value(0)
+	portStr := s.form.Value(1)
+	user := s.form.Value(2)
+	key := s.form.Value(3)
+	enabled := s.form.BoolValue(4)
+
+	port, err := actions.ParsePortStr(portStr)
+	if err != nil {
+		return err
+	}
+	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
+	if err := actions.UpdateHost(s.cfg, "", name, raw, key, !enabled); err != nil {
+		return err
+	}
+	s.notice = fmt.Sprintf("Updated host %q", name)
+	s.refresh()
+	for i, r := range s.visible {
+		if r.Name == name {
+			s.cursor = i
+			break
+		}
+	}
 	return nil
+}
+
+// openContainers pushes a Containers screen scoped to the host under the
+// cursor. Returns nil (no-op) when the list is empty or the host is
+// disabled — a scoped view of a disabled host would only show an empty
+// state, which isn't useful. The user can enable it with `x` first.
+func (s *hostsScreen) openContainers() tea.Cmd {
+	r := s.currentRow()
+	if r == nil || r.Disabled {
+		return nil
+	}
+	return pushCmd(newContainersScreenForHost(s.ctx, s.cfg, r.Name))
+}
+
+// openStacks pushes a Stacks screen scoped to the host under the cursor.
+// Same disabled-host guard as openContainers.
+func (s *hostsScreen) openStacks() tea.Cmd {
+	r := s.currentRow()
+	if r == nil || r.Disabled {
+		return nil
+	}
+	return pushCmd(newStacksScreenForHost(s.ctx, s.cfg, r.Name))
+}
+
+// openTrustPrompt stages a post-add confirm modal asking the user whether
+// to trust the newly added host's SSH key. Mirrors the CLI `marina hosts
+// add` prompt so both flows behave identically. Confirm pill is the
+// default focus — trusting after an explicit add is the typical path.
+func (s *hostsScreen) openTrustPrompt(name string) {
+	h, ok := s.cfg.Hosts[name]
+	if !ok {
+		return
+	}
+	addr := h.Address
+	s.prompt = &confirmPrompt{
+		title: fmt.Sprintf("Trust SSH host key for %q?", name),
+		details: []string{
+			fmt.Sprintf("Adds %s to ~/.ssh/known_hosts so marina can", addr),
+			"connect without the interactive first-time prompt.",
+			"Decline to leave the host untrusted — you can still",
+			"press `u` on the row later to trust it.",
+		},
+		confirmLabel: "Trust",
+		focus:        1, // additive action → default to Confirm
+		onYes: func() tea.Cmd {
+			return hostTrustCmd(s.ctx, s.cfg, name)
+		},
+	}
+	s.mode = hostsModeConfirmTrust
 }
 
 // openDeletePrompt stages the remove-host confirm modal. Row is captured at
@@ -430,8 +606,36 @@ func hostTestCmd(ctx context.Context, cfg *config.Config, host string) tea.Cmd {
 		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		r := actions.TestHost(probeCtx, cfg, host)
-		return hostTestResultMsg{host: r.Host, ok: r.OK, latency: r.Latency, err: r.Err}
+		return hostTestResultMsg{
+			host:      r.Host,
+			ok:        r.OK,
+			latency:   r.Latency,
+			err:       r.Err,
+			untrusted: r.Untrusted,
+		}
 	}
+}
+
+// hostTrustCmd wraps actions.TrustHost in a tea.Cmd. A successful trust is
+// always followed (in the Update handler) by an immediate test probe, so
+// callers don't need to orchestrate the chain themselves.
+func hostTrustCmd(ctx context.Context, cfg *config.Config, host string) tea.Cmd {
+	return func() tea.Msg {
+		trustCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		err := actions.TrustHost(trustCtx, cfg, host)
+		return hostTrustResultMsg{host: host, err: err}
+	}
+}
+
+// trustCurrent kicks off a TrustHost command for the host under the
+// cursor. Returns nil (no-op) when the list is empty.
+func (s *hostsScreen) trustCurrent() tea.Cmd {
+	r := s.currentRow()
+	if r == nil {
+		return nil
+	}
+	return hostTrustCmd(s.ctx, s.cfg, r.Name)
 }
 
 // refresh rebuilds the row cache from the in-memory config and reapplies
@@ -481,12 +685,4 @@ func max0(n int) int {
 		return 0
 	}
 	return n
-}
-
-func sumInts(v []int) int {
-	total := 0
-	for _, x := range v {
-		total += x
-	}
-	return total
 }

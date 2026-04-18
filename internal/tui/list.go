@@ -5,6 +5,9 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/AhmedAburady/marina/internal/actions"
+	"github.com/AhmedAburady/marina/internal/config"
 )
 
 // ── List rendering ─────────────────────────────────────────────────────────
@@ -114,8 +117,14 @@ func mutedLine(width int, text string) string {
 // summaryLine — used by Updates for the "N update(s) available · showing
 // all" strip above the list. Same indent as data rows so everything lines
 // up vertically.
+//
+// Both the gap and the meta span carry sSuccess's cBg fill explicitly so
+// the row stays seamless — a bare "    " between the plain bold text and
+// sMuted's inner render would terminate sSuccess's fill mid-row (see
+// docs/Styling.md §A1).
 func summaryLine(width int, bold, meta string) string {
-	return panelLine(sSuccess, width, pad(rowPadW)+bold+"    "+sMuted.Render(meta))
+	gap := sSuccess.Render("    ")
+	return panelLine(sSuccess, width, pad(rowPadW)+bold+gap+sMuted.Render(meta))
 }
 
 // ── Grouped list assembly ─────────────────────────────────────────────────
@@ -224,6 +233,25 @@ func viewportBody(
 	}
 	rendered := sb.View(width, height, content, cursorLine, headerLine)
 	return strings.Split(rendered, "\n")
+}
+
+// scopedHosts returns the hosts map a fan-out screen should fetch from.
+// An empty hostFilter means "every enabled host" (the default home-menu
+// entry point). A non-empty hostFilter narrows the set to that single
+// host — used when a list screen is launched scoped from the Hosts
+// screen (press `c` for Containers or `s` for Stacks on a row).
+//
+// When the filter names a host that doesn't exist or is disabled, the
+// returned map is empty and the screen will render its empty state.
+func scopedHosts(cfg *config.Config, hostFilter string) map[string]*config.HostConfig {
+	all := actions.EnabledHosts(cfg)
+	if hostFilter == "" {
+		return all
+	}
+	if h, ok := all[hostFilter]; ok {
+		return map[string]*config.HostConfig{hostFilter: h}
+	}
+	return map[string]*config.HostConfig{}
 }
 
 // ── Action-state helpers ──────────────────────────────────────────────────

@@ -44,6 +44,8 @@ func newHomeScreen(ctx context.Context, cfg *config.Config) *homeScreen {
 				func(ctx context.Context, cfg *config.Config) Screen { return newUpdatesScreen(ctx, cfg) }},
 			{"Prune", "Remove unused Docker resources across hosts",
 				func(ctx context.Context, cfg *config.Config) Screen { return newPruneScreen(ctx, cfg) }},
+			{"Settings", "Edit global SSH, update, and notification settings",
+				func(ctx context.Context, cfg *config.Config) Screen { return newSettingsScreen(ctx, cfg) }},
 		},
 	}
 }

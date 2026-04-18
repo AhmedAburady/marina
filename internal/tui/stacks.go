@@ -60,49 +60,64 @@ const (
 )
 
 // stacksScreen aggregates every running Compose stack (and config-registered
-// stacks that are fully stopped) across all hosts.
+// stacks that are fully stopped) across all hosts. When hostFilter is set,
+// the screen is scoped to a single host (launched by pressing `s` on a row
+// in the Hosts screen).
 type stacksScreen struct {
-	ctx      context.Context
-	cfg      *config.Config
-	rows     []stackRow // unfiltered
-	visible  []stackRow // post-filter — cursor + actions index into this
-	cursor   int
-	loading  bool
-	err      error
-	pending  map[string]bool
-	errors   map[string]string
-	results  map[string]HostFetchResult // accumulated per-host results for streaming render
-	expected int                        // number of HostFetchedMsg we await before clearing loading
-	received int
-	spinner  spinner.Model
-	mode     stacksMode
-	prompt   *confirmPrompt
-	form     *inlineForm
-	filter   filterBar
-	notice   string
-	sb       scrollBody
+	ctx        context.Context
+	cfg        *config.Config
+	hostFilter string     // "" = all hosts; otherwise the one host name we scope to
+	rows       []stackRow // unfiltered
+	visible    []stackRow // post-filter — cursor + actions index into this
+	cursor     int
+	loading    bool
+	err        error
+	pending    map[string]bool
+	errors     map[string]string
+	results    map[string]HostFetchResult // accumulated per-host results for streaming render
+	expected   int                        // number of HostFetchedMsg we await before clearing loading
+	received   int
+	spinner    spinner.Model
+	mode       stacksMode
+	prompt     *confirmPrompt
+	form       *inlineForm
+	filter     filterBar
+	notice     string
+	sb         scrollBody
 }
 
 func newStacksScreen(ctx context.Context, cfg *config.Config) *stacksScreen {
+	return newStacksScreenScoped(ctx, cfg, "")
+}
+
+// newStacksScreenForHost is the scoped constructor used when launching from
+// the Hosts screen — only the named host is fetched and listed.
+func newStacksScreenForHost(ctx context.Context, cfg *config.Config, host string) *stacksScreen {
+	return newStacksScreenScoped(ctx, cfg, host)
+}
+
+func newStacksScreenScoped(ctx context.Context, cfg *config.Config, host string) *stacksScreen {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = sSpinner
 	return &stacksScreen{
-		ctx:     ctx,
-		cfg:     cfg,
-		loading: true,
-		pending: make(map[string]bool),
-		errors:  make(map[string]string),
-		results: make(map[string]HostFetchResult),
-		spinner: sp,
-		sb:      newScrollBody(),
-		filter:  newFilterBar(),
+		ctx:        ctx,
+		cfg:        cfg,
+		hostFilter: host,
+		loading:    true,
+		pending:    make(map[string]bool),
+		errors:     make(map[string]string),
+		results:    make(map[string]HostFetchResult),
+		spinner:    sp,
+		sb:         newScrollBody(),
+		filter:     newFilterBar(),
 	}
 }
 
-// startFetch resets per-host streaming state and returns the enabled hosts map
-// so callers can pass it directly to FetchAllHostsCmd without a second lookup.
+// startFetch resets per-host streaming state and returns the hosts map so
+// callers can pass it directly to FetchAllHostsCmd. Narrowed to a single
+// host when hostFilter is set.
 func (s *stacksScreen) startFetch() map[string]*config.HostConfig {
-	hosts := actions.EnabledHosts(s.cfg)
+	hosts := scopedHosts(s.cfg, s.hostFilter)
 	s.results = make(map[string]HostFetchResult, len(hosts))
 	s.expected = len(hosts)
 	s.received = 0
@@ -111,7 +126,12 @@ func (s *stacksScreen) startFetch() map[string]*config.HostConfig {
 	return hosts
 }
 
-func (s *stacksScreen) Title() string { return "Stacks" }
+func (s *stacksScreen) Title() string {
+	if s.hostFilter != "" {
+		return "Stacks — " + s.hostFilter
+	}
+	return "Stacks"
+}
 
 func (s *stacksScreen) Init() tea.Cmd {
 	hosts := s.startFetch()
