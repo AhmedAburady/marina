@@ -58,7 +58,7 @@ go build -o marina ./cmd/marina
 ## Quick start
 
 ```bash
-# 1. Register your first host
+# 1. Register your first host (prompts to trust the SSH host key — type yes)
 marina hosts add homelab 10.0.0.50
 
 # 2. Verify the SSH + Docker pipe works
@@ -72,6 +72,8 @@ marina
 ```
 
 `marina` with no arguments launches the full-screen dashboard. `marina <subcommand>` always prints plain tables for scripting.
+
+On a host Marina has never connected to before, `hosts add` offers to trust the SSH host key for you — the non-interactive equivalent of typing `yes` at OpenSSH's first-connection prompt. Skip with `--no-trust`, auto-accept with `--trust` (for scripts).
 
 ## Configuration
 
@@ -89,6 +91,8 @@ hosts:
     ssh_key: ~/.ssh/id_rsa       # per-host key override
     stacks:
       media: /opt/stacks/media   # register stopped stacks so they appear in listings
+  bastion:
+    address: 10.0.0.60:2222      # non-standard SSH port via host:port
 
 settings:
   username: username             # default SSH user for every host
@@ -102,7 +106,7 @@ notifications:
     priority: 5
 ```
 
-Per-host fields override `settings`. `stacks` entries are optional — they let Marina surface compose stacks that are currently stopped (and therefore invisible to `docker ps`).
+Per-host fields override `settings`. `stacks` entries are optional — they let Marina surface compose stacks that are currently stopped (and therefore invisible to `docker ps`). You can edit the file by hand, or use the **Settings** screen in the TUI / `marina config set <key> <value>` on the CLI to change any `settings.*` or `notifications.gotify.*` field without opening the YAML.
 
 **Gotify TLS**: Marina does not enforce `https://` — if you point it at `http://gotify.lan`, the notification will still send and your app token will travel in cleartext on whatever network sits between Marina and the Gotify server. For a homelab on a Tailscale tailnet, [Tailscale's auto-HTTPS](https://tailscale.com/kb/1153/enabling-https) is the easy path; otherwise any reverse proxy with a Let's Encrypt cert in front of Gotify works. Token storage: the app token in `config.yaml` lives in plaintext — keep the file at `0600`, or use `token_env:` to read it from an environment variable instead.
 
@@ -111,11 +115,12 @@ Per-host fields override `settings`. `stacks` entries are optional — they let 
 Launch with bare `marina`. Navigation is a screen stack:
 
 - **Home** — banner + menu. Arrow keys / Enter to open a section, `q` / `Ctrl+C` to quit.
-- **Hosts** — browse, test SSH + Docker connectivity per host, add / remove entries.
+- **Hosts** — browse and manage the host list. `a` add, `e` edit, `d` delete, `t` test SSH + Docker connectivity, `u` trust the SSH host key (for hosts added by editing the YAML directly), `x` enable/disable, `c` open Containers scoped to this host, `s` open Stacks scoped to this host. Adding a host runs a trust confirmation automatically.
 - **Containers** — every container across every host, grouped by host. Start / stop / restart / remove, filter with `/`. Row colour signals state: exited/dead → red, restarting → yellow, paused/created → dim.
 - **Stacks** — every compose project across every host. Start, stop, restart, pull, update (pull + up), purge, register, unregister. Row tinting for stopped/degraded stacks.
 - **Updates** — image digest checks against registries (HEAD requests, no image pulls). Multi-select → apply in one batch. Pinned digest refs (`@sha256:…`) are skipped.
 - **Prune** — four scopes (system / images-only / images-all / volumes) × multi-host selection. Confirm modal before any destructive action; shows reclaimed space per host after completion.
+- **Settings** — edit the global `settings.*` and `notifications.gotify.*` fields without opening `config.yaml`.
 
 Key bindings common to list screens: `↑/↓` move, `/` filter, `esc` back. Destructive actions always go through a two-pill confirm dialog with Cancel selected by default.
 
@@ -134,8 +139,14 @@ Every subcommand accepts these global flags:
 | Command | Description |
 |---|---|
 | `marina` | Open the full-screen dashboard (TTY-only — prints help otherwise) |
-| `marina hosts add <name> <addr>` | Register a host |
+| `marina hosts` | List every configured host |
+| `marina hosts add <name> <addr> [-k key] [-p port] [--trust\|--no-trust]` | Register a host; prompts to trust the SSH key unless `--trust` / `--no-trust` is set |
+| `marina hosts edit <name> [-a addr] [-u user] [-k key] [-p port] [--enable\|--disable]` | Change any of a host's fields; only the flags you pass are touched |
+| `marina hosts remove <name>` | Delete a host entry |
+| `marina hosts enable <name>` / `marina hosts disable <name>` | Toggle the disabled flag (disabled hosts are skipped by fan-out ops) |
 | `marina hosts test` | Concurrent SSH + Docker connectivity probe per host |
+| `marina config path` / `validate` | Print config file path / validate its contents |
+| `marina config set <key> <value>` | Set any of: `username`, `ssh_key`, `prune_after_update`, `gotify.url`, `gotify.token`, `gotify.priority` |
 | `marina ps` | List every container, grouped by host, coloured by state |
 | `marina stacks` | List every compose stack across all hosts |
 | `marina start / stop / restart / pull` | Per-container actions |
@@ -161,7 +172,7 @@ flowchart LR
 - **SSH transport** — every Docker API call tunnels through `docker system dial-stdio` via Docker CLI's `connhelper`. No open ports on hosts beyond SSH.
 - **Registry probes** — `HEAD /v2/<image>/manifests/<tag>` against the registry. No pulls, no rate-limit cost beyond a cheap manifest lookup per image.
 - **State cache** — after each successful fetch, Marina snapshots containers to `~/.config/marina/state.json`. When a host is unreachable, the cache backs the UI so you still see last-known state instead of a blank screen.
-- **Known hosts enforced** — Marina never disables `known_hosts` verification. A new host requires a one-time `ssh-keyscan`-style acceptance; after that, connections refuse on key mismatch.
+- **Known hosts enforced** — Marina never disables `known_hosts` verification. When you add a host (via `marina hosts add` or the TUI Hosts screen), Marina offers to run `ssh-keyscan` for you and write the key to `~/.ssh/known_hosts` — the non-interactive equivalent of typing `yes` at OpenSSH's first-connection prompt. If a host already has a key entry, the trust action refuses to overwrite it; a mismatch (potential MitM) must be resolved manually with `ssh-keygen -R`. After trust is established, connections refuse on any key change.
 
 ## Comparison
 

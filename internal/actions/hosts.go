@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,15 +296,19 @@ func IsHostTrusted(ctx context.Context, cfg *config.Config, name string) (bool, 
 	return len(out) > 0, nil
 }
 
-// splitHostPort splits "host" or "host:port" into its parts. Returns empty
-// strings when the input is empty; no error path because callers already
-// validated the address at add time.
+// splitHostPort splits "host", "host:port", or "[ipv6]:port" into its parts.
+// Returns empty strings when the input is empty. Uses net.SplitHostPort so
+// bracketed IPv6 literals are handled correctly; a bare IPv6 (no brackets,
+// no port) falls back to (addr, "") since net.SplitHostPort errors on
+// "too many colons" for that shape.
 func splitHostPort(addr string) (host, port string) {
-	host = addr
-	if i := strings.LastIndex(addr, ":"); i >= 0 && !strings.Contains(addr, "]") {
-		host, port = addr[:i], addr[i+1:]
+	if addr == "" {
+		return "", ""
 	}
-	return host, port
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		return h, p
+	}
+	return addr, ""
 }
 
 // knownHostsLookup returns the string that ssh-keygen -F expects to match

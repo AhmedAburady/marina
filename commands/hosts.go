@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -108,6 +109,9 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, raw := args[0], args[1]
+			if port < 0 || port > 65535 {
+				return fmt.Errorf("--port must be 0–65535, got %d", port)
+			}
 			// If --port is supplied and the address doesn't already carry
 			// one, tack it on. Lets users write `add myhost user@host -p 2222`
 			// without remembering the host:port syntax.
@@ -155,8 +159,10 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 							Value(&accept),
 					),
 				).Run(); err != nil {
-					// Non-TTY or user interrupt — fall through without trusting.
-					return nil
+					if errors.Is(err, huh.ErrUserAborted) {
+						return nil // user cancelled — clean exit
+					}
+					return err // non-TTY, I/O failure, etc.
 				}
 			}
 			if !accept {
@@ -204,6 +210,9 @@ Only the flags you pass are changed; the rest are left alone.`,
 			name := args[0]
 			if enable && disable {
 				return fmt.Errorf("--enable and --disable are mutually exclusive")
+			}
+			if cmd.Flags().Changed("port") && (port < 0 || port > 65535) {
+				return fmt.Errorf("--port must be 0–65535, got %d", port)
 			}
 
 			cfg, err := config.Load(gf.Config)
