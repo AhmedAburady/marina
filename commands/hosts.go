@@ -1,11 +1,12 @@
 package commands
 
 import (
+	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
+	"charm.land/huh/v2"
 	"charm.land/huh/v2/spinner"
 
 	"github.com/AhmedAburady/marina/internal/actions"
@@ -25,6 +26,7 @@ func newHostsCmd(gf *GlobalFlags) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newHostsAddCmd(gf),
+		newHostsEditCmd(gf),
 		newHostsRemoveCmd(gf),
 		newHostsTestCmd(gf),
 		newHostsDisableCmd(gf),
@@ -88,13 +90,18 @@ func newHostsToggleCmd(gf *GlobalFlags, verb, short string, disabled bool) *cobr
 }
 
 func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
-	var sshKey string
+	var (
+		sshKey   string
+		trust    bool
+		noTrust  bool
+	)
 	cmd := &cobra.Command{
 		Use:   "add <name> <address>",
 		Short: "Add a remote Docker host",
 		Example: `  marina hosts add gmktec 10.0.0.50
   marina hosts add pve-arr user@10.0.0.51
-  marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa`,
+  marina hosts add synology root@synology.tail -k ~/.ssh/id_rsa
+  marina hosts add ci-box ci@10.0.0.60 --trust`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, raw := args[0], args[1]
@@ -107,10 +114,124 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 			}
 			hostCfg := cfg.Hosts[name]
 			cmd.Printf("Added host %q (%s)\n", name, hostCfg.SSHAddress(cfg.Settings.Username))
+
+			// Already trusted? Skip the prompt — nothing to do. Lets users
+			// re-add a host they already accepted without being asked again.
+			if alreadyTrusted, _ := actions.IsHostTrusted(cmd.Context(), cfg, name); alreadyTrusted {
+				return nil
+			}
+
+			// Trust decision: --trust / --no-trust short-circuit the prompt
+			// (use these in scripts). Otherwise fall back to an interactive
+			// yes/no — the non-interactive equivalent of OpenSSH's first-
+			// connection "Are you sure you want to continue connecting?".
+			accept := trust
+			if !trust && !noTrust {
+				if err := huh.NewForm(
+					huh.NewGroup(
+						huh.NewConfirm().
+							Title(fmt.Sprintf("Trust SSH host key for %q?", name)).
+							Description(fmt.Sprintf("Adds %s to ~/.ssh/known_hosts so marina can connect without\n"+
+								"the interactive first-time prompt. Declining leaves the host untrusted —\n"+
+								"run `marina hosts test %s` after you've accepted the key manually.",
+								hostCfg.Address, name)).
+							Affirmative("Yes, trust").
+							Negative("No, skip").
+							Value(&accept),
+					),
+				).Run(); err != nil {
+					// Non-TTY or user interrupt — fall through without trusting.
+					return nil
+				}
+			}
+			if !accept {
+				return nil
+			}
+
+			trustCtx, cancel := context.WithTimeout(cmd.Context(), 10*time.Second)
+			defer cancel()
+			if err := actions.TrustHost(trustCtx, cfg, name); err != nil {
+				cmd.PrintErrf("Trust failed: %s\n", err)
+				return nil
+			}
+			cmd.Printf("Trusted host %q\n", name)
 			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host")
+	cmd.Flags().BoolVar(&trust, "trust", false, "Trust the host key without prompting (scripts/CI)")
+	cmd.Flags().BoolVar(&noTrust, "no-trust", false, "Skip trusting the host key entirely")
+	return cmd
+}
+
+func newHostsEditCmd(gf *GlobalFlags) *cobra.Command {
+	var (
+		address string
+		user    string
+		sshKey  string
+		enable  bool
+		disable bool
+	)
+	cmd := &cobra.Command{
+		Use:   "edit <name>",
+		Short: "Edit a remote Docker host",
+		Long: `Edit an existing host's address, user, SSH key, or enable/disable state.
+Only the flags you pass are changed; the rest are left alone.`,
+		Example: `  marina hosts edit gmktec --address 10.0.0.51
+  marina hosts edit pve-arr --user admin
+  marina hosts edit synology -k ~/.ssh/id_ed25519
+  marina hosts edit ci-box --disable`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			if enable && disable {
+				return fmt.Errorf("--enable and --disable are mutually exclusive")
+			}
+
+			cfg, err := config.Load(gf.Config)
+			if err != nil {
+				return err
+			}
+			h, ok := cfg.Hosts[name]
+			if !ok {
+				return fmt.Errorf("host %q not found", name)
+			}
+
+			// Flag semantics: "not set" means "keep current value"; an
+			// explicitly empty string means "clear it". cobra's Changed()
+			// is the only way to distinguish the two.
+			newUser := h.User
+			if cmd.Flags().Changed("user") {
+				newUser = user
+			}
+			newAddress := h.Address
+			if cmd.Flags().Changed("address") {
+				newAddress = address
+			}
+			newKey := h.SSHKey
+			if cmd.Flags().Changed("key") {
+				newKey = sshKey
+			}
+			newDisabled := h.Disabled
+			if enable {
+				newDisabled = false
+			}
+			if disable {
+				newDisabled = true
+			}
+
+			if err := actions.UpdateHost(cfg, gf.Config, name, actions.JoinUserAddress(newUser, newAddress), newKey, newDisabled); err != nil {
+				return err
+			}
+			cmd.Printf("Updated host %q\n", name)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&address, "address", "a", "", "Host address (host[:port])")
+	cmd.Flags().StringVarP(&user, "user", "u", "", "SSH user override (empty string clears)")
+	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path (empty string clears)")
+	cmd.Flags().BoolVar(&enable, "enable", false, "Enable this host")
+	cmd.Flags().BoolVar(&disable, "disable", false, "Disable this host")
 	return cmd
 }
 
@@ -151,15 +272,15 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				return err
 			}
 
-			targets := make(map[string]struct{})
+			var targets []string
 			if len(args) == 1 {
 				if _, ok := cfg.Hosts[args[0]]; !ok {
 					return fmt.Errorf("host %q not found", args[0])
 				}
-				targets[args[0]] = struct{}{}
+				targets = append(targets, args[0])
 			} else {
 				for name := range actions.EnabledHosts(cfg) {
-					targets[name] = struct{}{}
+					targets = append(targets, name)
 				}
 			}
 			if len(targets) == 0 {
@@ -172,20 +293,12 @@ func newHostsTestCmd(gf *GlobalFlags) *cobra.Command {
 				Type(spinner.MiniDot).
 				Title(fmt.Sprintf("Testing %d host(s)...", len(targets))).
 				Action(func() {
-					results := make(chan actions.TestResult, len(targets))
-					var wg sync.WaitGroup
-					for name := range targets {
-						wg.Add(1)
-						go func(n string) {
-							defer wg.Done()
-							results <- actions.TestHost(cmd.Context(), cfg, n)
-						}(name)
-					}
-					go func() {
-						wg.Wait()
-						close(results)
-					}()
-					for r := range results {
+					// Use the shared FanOut helper — same concurrency
+					// primitive as actions.FetchAllHosts and checks.
+					for r := range actions.FanOut(cmd.Context(), targets, 0,
+						func(ctx context.Context, name string) actions.TestResult {
+							return actions.TestHost(ctx, cfg, name)
+						}) {
 						collected = append(collected, r)
 					}
 				}).

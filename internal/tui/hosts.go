@@ -17,20 +17,30 @@ import (
 
 // hostTestResultMsg carries the outcome of one SSH probe.
 type hostTestResultMsg struct {
-	host    string
-	ok      bool
-	latency time.Duration
-	err     error
+	host      string
+	ok        bool
+	latency   time.Duration
+	err       error
+	untrusted bool
+}
+
+// hostTrustResultMsg carries the outcome of one TrustHost attempt. A
+// successful trust is always followed by a test probe so the user sees the
+// row transition from "untrusted" to "ok" in one action.
+type hostTrustResultMsg struct {
+	host string
+	err  error
 }
 
 // hostTestState holds the transient test status for one row. `pending` is
 // true while the probe is in flight; `done` + `ok`/`err` carry the result.
 type hostTestState struct {
-	pending bool
-	done    bool
-	ok      bool
-	latency time.Duration
-	err     error
+	pending   bool
+	done      bool
+	ok        bool
+	latency   time.Duration
+	err       error
+	untrusted bool
 }
 
 // hostsMode toggles between the plain list and the inline add / confirm
@@ -42,6 +52,7 @@ const (
 	hostsModeAdd
 	hostsModeEdit
 	hostsModeConfirmDelete
+	hostsModeConfirmTrust
 )
 
 // hostsScreen is the "Hosts" destination: list, test, add, remove.
@@ -85,13 +96,13 @@ func (s *hostsScreen) Help() string {
 	switch s.mode {
 	case hostsModeAdd, hostsModeEdit:
 		return "tab move · space toggle · enter save · esc cancel"
-	case hostsModeConfirmDelete:
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		return "←/→ select · enter confirm · esc cancel"
 	}
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · t test · x disable · a add · e edit · d delete · R refresh · esc back"
+	return "↑/↓ move · / filter · t test · u trust · x disable · a add · e edit · d delete · R refresh · esc back"
 }
 
 func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -105,12 +116,23 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 				s.mode = hostsModeList
 				s.form = nil
 			case submit:
-				if err := s.commitAdd(); err != nil {
+				name, err := s.commitAdd()
+				if err != nil {
 					s.form.err = err.Error()
 					return s, cmd
 				}
-				s.mode = hostsModeList
 				s.form = nil
+				// If the host already has a key in known_hosts (user added
+				// it manually before, or it was added for another marina
+				// host with the same address), skip the trust prompt and go
+				// straight to the list. `u` is still available for manual
+				// re-trust attempts.
+				if trusted, _ := actions.IsHostTrusted(s.ctx, s.cfg, name); trusted {
+					s.mode = hostsModeList
+					return s, cmd
+				}
+				s.openTrustPrompt(name)
+				return s, cmd
 			}
 			return s, cmd
 		}
@@ -133,7 +155,7 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			}
 			return s, cmd
 		}
-	case hostsModeConfirmDelete:
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		if s.prompt != nil {
 			done, cmd := s.prompt.Update(msg)
 			if done {
@@ -182,6 +204,8 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.openAddForm()
 		case "e":
 			s.openEditForm()
+		case "u":
+			return s, s.trustCurrent()
 		case "d":
 			s.openDeletePrompt()
 		case "x":
@@ -202,6 +226,21 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		st.ok = msg.ok
 		st.latency = msg.latency
 		st.err = msg.err
+		st.untrusted = msg.untrusted
+
+	case hostTrustResultMsg:
+		if msg.err != nil {
+			s.notice = fmt.Sprintf("trust %q: %s", msg.host, strutil.FirstLine(msg.err.Error(), 60))
+			return s, nil
+		}
+		s.notice = fmt.Sprintf("Trusted %q", msg.host)
+		// Clear any stale untrusted state and chain an immediate test probe
+		// so the row transitions from "untrusted — press u" to the real
+		// connection status without requiring another keypress.
+		delete(s.states, msg.host)
+		s.states[msg.host] = &hostTestState{pending: true}
+		s.pending++
+		return s, tea.Batch(hostTestCmd(s.ctx, s.cfg, msg.host), s.spinner.Tick)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -231,7 +270,7 @@ func (s *hostsScreen) Modal() (string, bool) {
 			return "", false
 		}
 		return s.form.Modal(), true
-	case hostsModeConfirmDelete:
+	case hostsModeConfirmDelete, hostsModeConfirmTrust:
 		if s.prompt == nil {
 			return "", false
 		}
@@ -313,6 +352,9 @@ func (s *hostsScreen) statusCell(r actions.HostRow) string {
 	if st.ok {
 		return fmt.Sprintf("ok %s", st.latency.Round(time.Millisecond))
 	}
+	if st.untrusted {
+		return "untrusted — press u"
+	}
 	return "unreachable"
 }
 
@@ -333,20 +375,15 @@ func (s *hostsScreen) openAddForm() {
 	s.mode = hostsModeAdd
 }
 
-func (s *hostsScreen) commitAdd() error {
+// commitAdd persists the add-form values as a new host entry. Returns the
+// host name so the caller can chain follow-up commands (e.g. auto-trust).
+func (s *hostsScreen) commitAdd() (string, error) {
 	name := s.form.Value(0)
 	address := s.form.Value(1)
 	user := s.form.Value(2)
 	key := s.form.Value(3)
-	// Join user + address into the "user@host" form ParseAddress expects.
-	// When user is blank, ParseAddress accepts the bare host and the global
-	// default kicks in at SSH dial time.
-	raw := address
-	if user != "" {
-		raw = user + "@" + address
-	}
-	if err := actions.AddHost(s.cfg, "", name, raw, key); err != nil {
-		return err
+	if err := actions.AddHost(s.cfg, "", name, actions.JoinUserAddress(user, address), key); err != nil {
+		return "", err
 	}
 	s.notice = fmt.Sprintf("Added host %q", name)
 	s.refresh()
@@ -358,7 +395,7 @@ func (s *hostsScreen) commitAdd() error {
 			break
 		}
 	}
-	return nil
+	return name, nil
 }
 
 // openEditForm opens the edit-host dialog pre-filled with the current row's
@@ -402,11 +439,7 @@ func (s *hostsScreen) commitEdit() error {
 	key := s.form.Value(2)
 	enabled := s.form.BoolValue(3)
 
-	raw := address
-	if user != "" {
-		raw = user + "@" + address
-	}
-	if err := actions.UpdateHost(s.cfg, "", name, raw, key, !enabled); err != nil {
+	if err := actions.UpdateHost(s.cfg, "", name, actions.JoinUserAddress(user, address), key, !enabled); err != nil {
 		return err
 	}
 	s.notice = fmt.Sprintf("Updated host %q", name)
@@ -418,6 +451,33 @@ func (s *hostsScreen) commitEdit() error {
 		}
 	}
 	return nil
+}
+
+// openTrustPrompt stages a post-add confirm modal asking the user whether
+// to trust the newly added host's SSH key. Mirrors the CLI `marina hosts
+// add` prompt so both flows behave identically. Confirm pill is the
+// default focus — trusting after an explicit add is the typical path.
+func (s *hostsScreen) openTrustPrompt(name string) {
+	h, ok := s.cfg.Hosts[name]
+	if !ok {
+		return
+	}
+	addr := h.Address
+	s.prompt = &confirmPrompt{
+		title: fmt.Sprintf("Trust SSH host key for %q?", name),
+		details: []string{
+			fmt.Sprintf("Adds %s to ~/.ssh/known_hosts so marina can", addr),
+			"connect without the interactive first-time prompt.",
+			"Decline to leave the host untrusted — you can still",
+			"press `u` on the row later to trust it.",
+		},
+		confirmLabel: "Trust",
+		focus:        1, // additive action → default to Confirm
+		onYes: func() tea.Cmd {
+			return hostTrustCmd(s.ctx, s.cfg, name)
+		},
+	}
+	s.mode = hostsModeConfirmTrust
 }
 
 // openDeletePrompt stages the remove-host confirm modal. Row is captured at
@@ -513,8 +573,36 @@ func hostTestCmd(ctx context.Context, cfg *config.Config, host string) tea.Cmd {
 		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		r := actions.TestHost(probeCtx, cfg, host)
-		return hostTestResultMsg{host: r.Host, ok: r.OK, latency: r.Latency, err: r.Err}
+		return hostTestResultMsg{
+			host:      r.Host,
+			ok:        r.OK,
+			latency:   r.Latency,
+			err:       r.Err,
+			untrusted: r.Untrusted,
+		}
 	}
+}
+
+// hostTrustCmd wraps actions.TrustHost in a tea.Cmd. A successful trust is
+// always followed (in the Update handler) by an immediate test probe, so
+// callers don't need to orchestrate the chain themselves.
+func hostTrustCmd(ctx context.Context, cfg *config.Config, host string) tea.Cmd {
+	return func() tea.Msg {
+		trustCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		err := actions.TrustHost(trustCtx, cfg, host)
+		return hostTrustResultMsg{host: host, err: err}
+	}
+}
+
+// trustCurrent kicks off a TrustHost command for the host under the
+// cursor. Returns nil (no-op) when the list is empty.
+func (s *hostsScreen) trustCurrent() tea.Cmd {
+	r := s.currentRow()
+	if r == nil {
+		return nil
+	}
+	return hostTrustCmd(s.ctx, s.cfg, r.Name)
 }
 
 // refresh rebuilds the row cache from the in-memory config and reapplies
@@ -564,12 +652,4 @@ func max0(n int) int {
 		return 0
 	}
 	return n
-}
-
-func sumInts(v []int) int {
-	total := 0
-	for _, x := range v {
-		total += x
-	}
-	return total
 }

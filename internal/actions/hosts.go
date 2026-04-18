@@ -4,6 +4,9 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -85,6 +88,17 @@ func resolvedKey(h *config.HostConfig, cfg *config.Config) string {
 		return cfg.Settings.SSHKey + " (global)"
 	}
 	return "(none)"
+}
+
+// JoinUserAddress builds the "user@host" form ParseAddress expects, or just
+// "host" when user is empty. UIs that split user/host across two inputs
+// (TUI forms, CLI --user + --address flags) use this so the wire format
+// stays consistent across surfaces.
+func JoinUserAddress(user, address string) string {
+	if user == "" {
+		return address
+	}
+	return user + "@" + address
 }
 
 // ParsedAddress is the output of ParseAddress: an optional user, a required
@@ -185,17 +199,22 @@ func RemoveHosts(cfg *config.Config, configPath string, names ...string) (remove
 }
 
 // TestResult is one TestHost outcome. OK true means the SSH round-trip
-// succeeded; err is set on failure.
+// succeeded; err is set on failure. Untrusted specifically marks failures
+// caused by the host's key not being in ~/.ssh/known_hosts — see TrustHost
+// for the corresponding fix action.
 type TestResult struct {
-	Host    string
-	OK      bool
-	Latency time.Duration
-	Err     error
+	Host      string
+	OK        bool
+	Latency   time.Duration
+	Err       error
+	Untrusted bool
 }
 
 // TestHost runs a synchronous `echo ok` probe against one host using the
 // resolved SSH config. Bound by the caller's context so a slow host can't
-// block ^C.
+// block ^C. When the probe fails because the host key isn't trusted,
+// TestResult.Untrusted is set so UIs can offer a "trust this host" action
+// instead of a generic "unreachable" error.
 func TestHost(ctx context.Context, cfg *config.Config, name string) TestResult {
 	h, ok := cfg.Hosts[name]
 	if !ok {
@@ -206,13 +225,117 @@ func TestHost(ctx context.Context, cfg *config.Config, name string) TestResult {
 		KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
 	}
 	start := time.Now()
-	_, err := internalssh.Exec(ctx, sshCfg, "echo ok")
-	return TestResult{
+	output, err := internalssh.Exec(ctx, sshCfg, "echo ok")
+	result := TestResult{
 		Host:    name,
 		OK:      err == nil,
 		Latency: time.Since(start),
 		Err:     err,
 	}
+	if err != nil && strings.Contains(output, "Host key verification failed") {
+		result.Untrusted = true
+	}
+	return result
+}
+
+// IsHostTrusted returns true if the host already has an entry in the
+// user's ~/.ssh/known_hosts. Used to decide whether to prompt for trust
+// (TUI/CLI add flow) — a trusted host just skips straight to testing.
+func IsHostTrusted(ctx context.Context, cfg *config.Config, name string) (bool, error) {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		return false, fmt.Errorf("host %q not found", name)
+	}
+	addr, port := splitHostPort(h.Address)
+	if addr == "" {
+		return false, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return false, err
+	}
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+	out, _ := exec.CommandContext(ctx, "ssh-keygen", "-F", knownHostsLookup(addr, port), "-f", knownHosts).Output()
+	return len(out) > 0, nil
+}
+
+// splitHostPort splits "host" or "host:port" into its parts. Returns empty
+// strings when the input is empty; no error path because callers already
+// validated the address at add time.
+func splitHostPort(addr string) (host, port string) {
+	host = addr
+	if i := strings.LastIndex(addr, ":"); i >= 0 && !strings.Contains(addr, "]") {
+		host, port = addr[:i], addr[i+1:]
+	}
+	return host, port
+}
+
+// knownHostsLookup returns the string that ssh-keygen -F expects to match
+// an entry — bare host for port 22, "[host]:port" otherwise.
+func knownHostsLookup(host, port string) string {
+	if port == "" || port == "22" {
+		return host
+	}
+	return fmt.Sprintf("[%s]:%s", host, port)
+}
+
+// TrustHost appends the host's public key to ~/.ssh/known_hosts via
+// ssh-keyscan — the non-interactive equivalent of typing "yes" at the
+// first-connection prompt. Refuses if the host already has a key entry,
+// leaving key-change (possible MitM) cases for the user to resolve with
+// ssh-keygen -R.
+func TrustHost(ctx context.Context, cfg *config.Config, name string) error {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		return fmt.Errorf("host %q not found", name)
+	}
+
+	addr, port := splitHostPort(h.Address)
+	if addr == "" {
+		return fmt.Errorf("host %q has no address", name)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home dir: %w", err)
+	}
+	knownHosts := filepath.Join(home, ".ssh", "known_hosts")
+
+	// Refuse to trust if the host already has a key registered: a mismatch
+	// here is the "REMOTE HOST IDENTIFICATION HAS CHANGED" scenario and is
+	// the user's problem to resolve manually.
+	lookup := knownHostsLookup(addr, port)
+	if out, _ := exec.CommandContext(ctx, "ssh-keygen", "-F", lookup, "-f", knownHosts).Output(); len(out) > 0 {
+		return fmt.Errorf("%s already has a key in known_hosts — remove it first with: ssh-keygen -R %s", lookup, lookup)
+	}
+
+	// Grab the host key. -H hashes the hostname entry for privacy; -T caps
+	// the probe at 5s so a dead host doesn't hang the UI.
+	scanArgs := []string{"-T", "5", "-H"}
+	if port != "" {
+		scanArgs = append(scanArgs, "-p", port)
+	}
+	scanArgs = append(scanArgs, addr)
+	scanOut, err := exec.CommandContext(ctx, "ssh-keyscan", scanArgs...).Output()
+	if err != nil {
+		return fmt.Errorf("ssh-keyscan %s: %w", addr, err)
+	}
+	if len(strings.TrimSpace(string(scanOut))) == 0 {
+		return fmt.Errorf("ssh-keyscan returned no keys for %s", addr)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(knownHosts), 0o700); err != nil {
+		return fmt.Errorf("create .ssh dir: %w", err)
+	}
+	f, err := os.OpenFile(knownHosts, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open known_hosts: %w", err)
+	}
+	defer f.Close()
+	if _, err := f.Write(scanOut); err != nil {
+		return fmt.Errorf("append known_hosts: %w", err)
+	}
+	return nil
 }
 
 // HostSSHConfig resolves the ssh.Config for a given host entry, applying
