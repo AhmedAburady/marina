@@ -143,6 +143,28 @@ func AddHost(cfg *config.Config, configPath, name, rawAddress, sshKey string) er
 	return config.Save(cfg, configPath)
 }
 
+// UpdateHost applies edits to an existing host entry. The address is parsed
+// with ParseAddress so callers can pass the raw user-entered string. All
+// fields are overwritten with the provided values — pass the current value
+// unchanged to leave a field alone.
+//
+// Returns an error if the host does not exist or the address fails to parse.
+func UpdateHost(cfg *config.Config, configPath, name, rawAddress, sshKey string, disabled bool) error {
+	h, ok := cfg.Hosts[name]
+	if !ok {
+		return fmt.Errorf("host %q not found", name)
+	}
+	parsed, err := ParseAddress(rawAddress)
+	if err != nil {
+		return err
+	}
+	h.Address = parsed.Address
+	h.User = parsed.User
+	h.SSHKey = sshKey
+	h.Disabled = disabled
+	return config.Save(cfg, configPath)
+}
+
 // RemoveHosts deletes one or more hosts from the config. Returns the names
 // that were actually removed and the names that weren't found.
 func RemoveHosts(cfg *config.Config, configPath string, names ...string) (removed, notFound []string, err error) {

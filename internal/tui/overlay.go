@@ -115,7 +115,12 @@ func renderFormModal(title string, fields []formField, focus int, errMsg, help s
 			style = sDialogFocus
 		}
 		rows = append(rows, style.Render(label))
-		rows = append(rows, inputRow(f, i == focus, inputWidth))
+		switch f.kind {
+		case fieldToggle:
+			rows = append(rows, toggleRow(f))
+		default:
+			rows = append(rows, inputRow(f, i == focus, inputWidth))
+		}
 
 		if i < len(fields)-1 {
 			rows = append(rows, sDialogGap.Render(""))
@@ -200,6 +205,22 @@ func inputRow(f formField, focused bool, width int) string {
 		return head
 	}
 	return head + sDialogInputFiller.Render(strings.Repeat(" ", width-headW))
+}
+
+// toggleRow renders a two-pill on/off switch for a fieldToggle. The "on"
+// side highlights when the field's boolean is true, the "off" side when
+// false. The gap between pills carries the modal fill so the row stays
+// seamless (see docs/Styling.md §A1).
+func toggleRow(f formField) string {
+	var onPill, offPill string
+	if f.boolValue {
+		onPill = renderPill(f.onLabel, true)
+		offPill = renderPill(f.offLabel, false)
+	} else {
+		onPill = renderPill(f.onLabel, false)
+		offPill = renderPill(f.offLabel, true)
+	}
+	return onPill + sDialogGap.Render(" ") + offPill
 }
 
 // renderPill renders one button in the confirm dialog.

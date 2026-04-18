@@ -40,25 +40,27 @@ type hostsMode int
 const (
 	hostsModeList hostsMode = iota
 	hostsModeAdd
+	hostsModeEdit
 	hostsModeConfirmDelete
 )
 
 // hostsScreen is the "Hosts" destination: list, test, add, remove.
 type hostsScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	rows    []actions.HostRow // unfiltered
-	visible []actions.HostRow // post-filter — cursor + actions index into this
-	cursor  int
-	states  map[string]*hostTestState
-	pending int
-	spinner spinner.Model
-	mode    hostsMode
-	form    *inlineForm
-	prompt  *confirmPrompt
-	filter  filterBar
-	notice  string
-	sb      scrollBody
+	ctx      context.Context
+	cfg      *config.Config
+	rows     []actions.HostRow // unfiltered
+	visible  []actions.HostRow // post-filter — cursor + actions index into this
+	cursor   int
+	states   map[string]*hostTestState
+	pending  int
+	spinner  spinner.Model
+	mode     hostsMode
+	form     *inlineForm
+	editName string // host name captured when the edit form was opened
+	prompt   *confirmPrompt
+	filter   filterBar
+	notice   string
+	sb       scrollBody
 }
 
 func newHostsScreen(ctx context.Context, cfg *config.Config) *hostsScreen {
@@ -81,15 +83,15 @@ func (s *hostsScreen) Init() tea.Cmd         { return nil }
 
 func (s *hostsScreen) Help() string {
 	switch s.mode {
-	case hostsModeAdd:
-		return "tab move · enter save · esc cancel"
+	case hostsModeAdd, hostsModeEdit:
+		return "tab move · space toggle · enter save · esc cancel"
 	case hostsModeConfirmDelete:
 		return "←/→ select · enter confirm · esc cancel"
 	}
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · t test · x disable · a add · d delete · R refresh · esc back"
+	return "↑/↓ move · / filter · t test · x disable · a add · e edit · d delete · R refresh · esc back"
 }
 
 func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -109,6 +111,25 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 				}
 				s.mode = hostsModeList
 				s.form = nil
+			}
+			return s, cmd
+		}
+	case hostsModeEdit:
+		if s.form != nil {
+			submit, cancel, cmd := s.form.Update(msg)
+			switch {
+			case cancel:
+				s.mode = hostsModeList
+				s.form = nil
+				s.editName = ""
+			case submit:
+				if err := s.commitEdit(); err != nil {
+					s.form.err = err.Error()
+					return s, cmd
+				}
+				s.mode = hostsModeList
+				s.form = nil
+				s.editName = ""
 			}
 			return s, cmd
 		}
@@ -159,6 +180,8 @@ func (s *hostsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			s.refresh()
 		case "a":
 			s.openAddForm()
+		case "e":
+			s.openEditForm()
 		case "d":
 			s.openDeletePrompt()
 		case "x":
@@ -198,11 +221,12 @@ func (s *hostsScreen) View(width, height int) string {
 	return s.viewList(width, height)
 }
 
-// Modal implements ModalProvider. When an add-host or delete-confirm flow
-// is open, the dashboard overlays this string over the list view.
+// Modal implements ModalProvider. When an add-host, edit-host, or
+// delete-confirm flow is open, the dashboard overlays this string over
+// the list view.
 func (s *hostsScreen) Modal() (string, bool) {
 	switch s.mode {
-	case hostsModeAdd:
+	case hostsModeAdd, hostsModeEdit:
 		if s.form == nil {
 			return "", false
 		}
@@ -328,6 +352,65 @@ func (s *hostsScreen) commitAdd() error {
 	s.refresh()
 	// Move cursor to the newly added row so the user sees the entry appear.
 	// Walk the visible slice so the index lands on the row that will render.
+	for i, r := range s.visible {
+		if r.Name == name {
+			s.cursor = i
+			break
+		}
+	}
+	return nil
+}
+
+// openEditForm opens the edit-host dialog pre-filled with the current row's
+// values. Name is intentionally omitted from the form — renaming would
+// require re-keying the config map, which is out of scope here. Enabled /
+// Disabled is exposed as a pill toggle so the user can change state from
+// the same dialog that edits address / user / key.
+func (s *hostsScreen) openEditForm() {
+	r := s.currentRow()
+	if r == nil {
+		return
+	}
+	h, ok := s.cfg.Hosts[r.Name]
+	if !ok {
+		return
+	}
+	// Reconstruct the display-friendly address the user typed when adding —
+	// join user back in so the edit view looks like the input they'd supply
+	// via `marina hosts add`.
+	rawAddr := h.Address
+	if h.User != "" {
+		rawAddr = h.User + "@" + h.Address
+	}
+	s.editName = r.Name
+	s.form = newInlineForm(fmt.Sprintf("Edit host %q", r.Name), []formField{
+		newTextFieldWithValue("address", "host or IP", rawAddr, true),
+		newTextFieldWithValue("user", "blank for global user", h.User, false),
+		newTextFieldWithValue("ssh key", "blank for global key", h.SSHKey, false),
+		newToggleField("status", "Enabled", "Disabled", !h.Disabled),
+	})
+	s.mode = hostsModeEdit
+}
+
+// commitEdit applies the form values through actions.UpdateHost. The host
+// name was captured at openEditForm time, so cursor movement while the
+// dialog is open doesn't affect which host gets updated.
+func (s *hostsScreen) commitEdit() error {
+	name := s.editName
+	address := s.form.Value(0)
+	user := s.form.Value(1)
+	key := s.form.Value(2)
+	enabled := s.form.BoolValue(3)
+
+	raw := address
+	if user != "" {
+		raw = user + "@" + address
+	}
+	if err := actions.UpdateHost(s.cfg, "", name, raw, key, !enabled); err != nil {
+		return err
+	}
+	s.notice = fmt.Sprintf("Updated host %q", name)
+	s.refresh()
 	for i, r := range s.visible {
 		if r.Name == name {
 			s.cursor = i
