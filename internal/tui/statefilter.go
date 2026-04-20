@@ -45,19 +45,23 @@ var (
 			Foreground(cDim).
 			Padding(0, 1)
 
-	sStateLabel   = lipgloss.NewStyle().Background(cBg).Foreground(cDim)
-	sStateGap     = lipgloss.NewStyle().Background(cBg)
-	sStateDotRun  = lipgloss.NewStyle().Background(cBg).Foreground(cGreen).Bold(true)
-	sStateDotStop = lipgloss.NewStyle().Background(cBg).Foreground(cRed).Bold(true)
-	sStateNum     = lipgloss.NewStyle().Background(cBg).Foreground(cWhite).Bold(true)
-	sStateUnit    = lipgloss.NewStyle().Background(cBg).Foreground(cDim)
+	sStateLabel       = lipgloss.NewStyle().Background(cBg).Foreground(cDim)
+	sStateGap         = lipgloss.NewStyle().Background(cBg)
+	sStateDotRun      = lipgloss.NewStyle().Background(cBg).Foreground(cGreen).Bold(true)
+	sStateDotDegraded = lipgloss.NewStyle().Background(cBg).Foreground(cOrange).Bold(true)
+	sStateDotStop     = lipgloss.NewStyle().Background(cBg).Foreground(cRed).Bold(true)
+	sStateNum         = lipgloss.NewStyle().Background(cBg).Foreground(cWhite).Bold(true)
+	sStateUnit        = lipgloss.NewStyle().Background(cBg).Foreground(cDim)
 )
 
-// View renders the pill strip as one full-width panel row. Running/stopped
-// counts sit right after the pills with a generous gap so they're always
-// visible regardless of terminal width. Coloured dots carry the semantics;
-// numbers are bold in white for scan-ability.
-func (f *stateFilter) View(width int, running, stopped int) string {
+// View renders the pill strip as one full-width panel row. Running/degraded/
+// stopped counts sit right after the pills with a generous gap so they're
+// always visible regardless of terminal width. Coloured dots mirror the row
+// colours used in the list body — green for fully running, amber for
+// degraded (stack with only some containers up), red for fully stopped. The
+// degraded segment is omitted when the count is zero so container screens
+// (which have no degraded concept) render as two buckets.
+func (f *stateFilter) View(width int, running, degraded, stopped int) string {
 	runPill := sStatePillIdle.Render("Running")
 	allPill := sStatePillIdle.Render("All")
 	if f.showAll {
@@ -66,12 +70,16 @@ func (f *stateFilter) View(width int, running, stopped int) string {
 		runPill = sStatePillActive.Render("Running")
 	}
 
-	dotRun := sStateDotRun.Render("●")
-	dotStop := sStateDotStop.Render("●")
+	segment := func(dot, count, unit string) string {
+		return dot + sStateGap.Render(" ") + sStateNum.Render(count) + sStateUnit.Render(" "+unit)
+	}
+	gap := sStateGap.Render("   ")
 
-	stats := dotRun + sStateGap.Render(" ") + sStateNum.Render(itoa(running)) + sStateUnit.Render(" running") +
-		sStateGap.Render("   ") +
-		dotStop + sStateGap.Render(" ") + sStateNum.Render(itoa(stopped)) + sStateUnit.Render(" stopped")
+	stats := segment(sStateDotRun.Render("●"), itoa(running), "running")
+	if degraded > 0 {
+		stats += gap + segment(sStateDotDegraded.Render("●"), itoa(degraded), "degraded")
+	}
+	stats += gap + segment(sStateDotStop.Render("●"), itoa(stopped), "stopped")
 
 	content := "  " + sStateLabel.Render("Show: ") + runPill + sStateGap.Render(" ") + allPill + sStateGap.Render("    ") + stats
 	return panelLine(sPanel, width, content)

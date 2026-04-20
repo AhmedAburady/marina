@@ -333,15 +333,18 @@ func (s *stacksScreen) View(width, height int) string {
 	// Fixed top / bottom rows; everything else scrolls.
 	var top []string
 	top = append(top, spacer(width))
-	running, stopped := 0, 0
+	running, degraded, stopped := 0, 0, 0
 	for _, r := range s.rows {
-		if r.running > 0 {
-			running++
-		} else {
+		switch {
+		case r.total == 0 || r.running == 0:
 			stopped++
+		case r.running < r.total:
+			degraded++
+		default:
+			running++
 		}
 	}
-	top = append(top, s.state.View(width, running, stopped))
+	top = append(top, s.state.View(width, running, degraded, stopped))
 	top = append(top, spacer(width))
 	if bar := s.filter.View(width, len(s.visible)); bar != "" {
 		top = append(top, bar)

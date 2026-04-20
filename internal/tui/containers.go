@@ -296,7 +296,7 @@ func (s *containersScreen) View(width, height int) string {
 			stopped++
 		}
 	}
-	top = append(top, s.state.View(width, running, stopped))
+	top = append(top, s.state.View(width, running, 0, stopped))
 	top = append(top, spacer(width))
 	if bar := s.filter.View(width, len(s.visible)); bar != "" {
 		top = append(top, bar)
