@@ -88,6 +88,7 @@ type containersScreen struct {
 	mode        containersMode
 	prompt      *confirmPrompt
 	filter      filterBar
+	state       stateFilter
 }
 
 func newContainersScreen(ctx context.Context, cfg *config.Config) *containersScreen {
@@ -163,7 +164,7 @@ func (s *containersScreen) Help() string {
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · s start · x stop · r restart · d remove · R refresh · esc back"
+	return "↑/↓ move · / filter · tab show all/running · s start · x stop · r restart · d remove · R refresh · esc back"
 }
 
 func (s *containersScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
@@ -207,6 +208,10 @@ func (s *containersScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			}
 		case "/":
 			return s, s.filter.Activate()
+		case "tab":
+			s.state.Toggle()
+			s.rebuildVisible()
+			return s, nil
 		case "R":
 			hosts := s.startFetch()
 			return s, tea.Batch(
@@ -279,6 +284,19 @@ func (s *containersScreen) View(width, height int) string {
 	// the list. filterBar.View returns "" when idle, so it only consumes a
 	// row when the user is actually filtering.
 	var top []string
+	top = append(top, spacer(width))
+	running, stopped := 0, 0
+	for _, r := range s.rows {
+		if s.stackFilter != "" && r.stack != s.stackFilter {
+			continue
+		}
+		if r.state == "running" {
+			running++
+		} else {
+			stopped++
+		}
+	}
+	top = append(top, s.state.View(width, running, stopped))
 	top = append(top, spacer(width))
 	if bar := s.filter.View(width, len(s.visible)); bar != "" {
 		top = append(top, bar)
@@ -444,6 +462,9 @@ func (s *containersScreen) rebuildVisible() {
 		// rows whose compose project matches. Containers with no compose
 		// label never match a non-empty stackFilter.
 		if s.stackFilter != "" && r.stack != s.stackFilter {
+			continue
+		}
+		if !s.state.MatchContainerState(r.state) {
 			continue
 		}
 		if s.filter.Match(r.host, r.stack, r.name, r.image, r.status, r.ports) {

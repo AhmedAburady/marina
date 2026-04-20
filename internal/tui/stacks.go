@@ -82,6 +82,7 @@ type stacksScreen struct {
 	prompt     *confirmPrompt
 	form       *inlineForm
 	filter     filterBar
+	state      stateFilter
 	notice     string
 	sb         scrollBody
 }
@@ -151,7 +152,7 @@ func (s *stacksScreen) Help() string {
 	if s.filter.Active() {
 		return "type to filter · enter apply · esc clear"
 	}
-	return "↑/↓ move · / filter · s start · x stop · r restart · p pull · u update · c containers · a add · d remove · P purge · R refresh · esc back"
+	return "↑/↓ move · / filter · tab show all/running · s start · x stop · r restart · p pull · u update · c containers · a add · d remove · P purge · R refresh · esc back"
 }
 
 // openContainers pushes a Containers screen scoped to the selected stack's
@@ -228,6 +229,10 @@ func (s *stacksScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 			}
 		case "/":
 			return s, s.filter.Activate()
+		case "tab":
+			s.state.Toggle()
+			s.rebuildVisible()
+			return s, nil
 		case "R":
 			hosts := s.startFetch()
 			return s, tea.Batch(
@@ -327,6 +332,16 @@ func (s *stacksScreen) View(width, height int) string {
 
 	// Fixed top / bottom rows; everything else scrolls.
 	var top []string
+	top = append(top, spacer(width))
+	running, stopped := 0, 0
+	for _, r := range s.rows {
+		if r.running > 0 {
+			running++
+		} else {
+			stopped++
+		}
+	}
+	top = append(top, s.state.View(width, running, stopped))
 	top = append(top, spacer(width))
 	if bar := s.filter.View(width, len(s.visible)); bar != "" {
 		top = append(top, bar)
@@ -446,6 +461,9 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 func (s *stacksScreen) rebuildVisible() {
 	s.visible = s.visible[:0]
 	for _, r := range s.rows {
+		if !s.state.MatchStackRunning(r.running) {
+			continue
+		}
 		if s.filter.Match(r.host, r.name, r.dir) {
 			s.visible = append(s.visible, r)
 		}

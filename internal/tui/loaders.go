@@ -36,7 +36,6 @@ func FetchAllHostsCmd(
 	}
 	cmds := make([]tea.Cmd, 0, len(targets))
 	for name, h := range targets {
-		name, h := name, h
 		cmds = append(cmds, func() tea.Msg {
 			return HostFetchedMsg{
 				Host:   name,
