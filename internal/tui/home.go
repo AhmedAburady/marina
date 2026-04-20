@@ -129,10 +129,7 @@ func (s *homeScreen) buildContent(width int) []string {
 	// ── Menu: one row per item. Selected item gets the accent bg bar; a
 	// blank spacer row between items gives the menu breathing room.
 	for i, item := range s.items {
-		blockW := min(60, width-8)
-		if blockW < 20 {
-			blockW = 20
-		}
+		blockW := max(min(60, width-8), 20)
 		outerPad := max0((width - blockW) / 2)
 
 		label := "    " + item.title

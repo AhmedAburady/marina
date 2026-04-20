@@ -34,7 +34,6 @@ func FanOut[T any, R any](ctx context.Context, items []T, limit int, fn func(con
 		var wg sync.WaitGroup
 	loop:
 		for _, item := range items {
-			item := item
 
 			if sem != nil {
 				// Block until a slot is free or ctx is cancelled. If ctx is
@@ -47,14 +46,12 @@ func FanOut[T any, R any](ctx context.Context, items []T, limit int, fn func(con
 				}
 			}
 
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				if sem != nil {
 					defer func() { <-sem }()
 				}
 				ch <- fn(ctx, item)
-			}()
+			})
 		}
 
 		// Shepherd: close the result channel once all workers are done.
