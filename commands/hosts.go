@@ -198,7 +198,7 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host (file-based auth)")
 	cmd.Flags().BoolVar(&agent, "agent", false, "Authenticate via the SSH agent (e.g. 1Password) instead of a key file")
-	cmd.Flags().StringVar(&agentSocket, "agent-socket", "", "SSH agent socket for --agent (blank = $SSH_AUTH_SOCK)")
+	cmd.Flags().StringVar(&agentSocket, "agent-socket", "", "SSH agent socket (implies --agent; blank = $SSH_AUTH_SOCK)")
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "SSH port (default 22). Ignored if the address already contains :port")
 	cmd.Flags().BoolVar(&trust, "trust", false, "Trust the host key without prompting (scripts/CI)")
 	cmd.Flags().BoolVar(&noTrust, "no-trust", false, "Skip trusting the host key entirely")

@@ -326,14 +326,20 @@ func expandPath(p string) string {
 func Validate(cfg *Config) []string {
 	var errs []string
 	if !validAuthMethod(cfg.Settings.AuthMethod) {
-		errs = append(errs, fmt.Sprintf("settings: auth_method must be %q or %q", AuthMethodKey, AuthMethodAgent))
+		errs = append(errs, fmt.Sprintf("settings: auth_method must be %q, %q, or empty (to infer from ssh_key)", AuthMethodKey, AuthMethodAgent))
+	}
+	// With no hosts to exercise it, a key-mode settings default with no key
+	// slips past the per-host check below (which never runs). Catch it upfront
+	// so saving such a config warns immediately, before the first host exists.
+	if len(cfg.Hosts) == 0 && cfg.Settings.AuthMethod == AuthMethodKey && cfg.Settings.SSHKey == "" {
+		errs = append(errs, fmt.Sprintf("settings: auth_method is %q but no ssh_key is set", AuthMethodKey))
 	}
 	for name, h := range cfg.Hosts {
 		if h.Address == "" {
 			errs = append(errs, fmt.Sprintf("host %q: address is required", name))
 		}
 		if !validAuthMethod(h.AuthMethod) {
-			errs = append(errs, fmt.Sprintf("host %q: auth_method must be %q or %q", name, AuthMethodKey, AuthMethodAgent))
+			errs = append(errs, fmt.Sprintf("host %q: auth_method must be %q, %q, or empty (to infer from ssh_key)", name, AuthMethodKey, AuthMethodAgent))
 			continue
 		}
 		// Key mode needs a key to point -i at; agent mode is fine without a

@@ -73,4 +73,25 @@ func TestValidateAuthMethod(t *testing.T) {
 	if errs := Validate(cfg3); len(errs) != 0 {
 		t.Errorf("unexpected errors for valid agent host: %v", errs)
 	}
+	// Settings auth_method=key with no ssh_key and no hosts is caught upfront,
+	// even though the per-host check never runs.
+	cfg4 := &Config{Settings: Settings{AuthMethod: AuthMethodKey}}
+	if errs := Validate(cfg4); len(errs) == 0 {
+		t.Error("expected an error for settings auth_method=key with no ssh_key and no hosts")
+	}
+	// But the same settings are fine once a host supplies its own key — the
+	// keyless-settings check must not fire when hosts exist.
+	cfg5 := &Config{
+		Settings: Settings{AuthMethod: AuthMethodKey},
+		Hosts:    map[string]*HostConfig{"h": {Address: "a", SSHKey: "/host/key"}},
+	}
+	if errs := Validate(cfg5); len(errs) != 0 {
+		t.Errorf("unexpected errors when a host provides its own key: %v", errs)
+	}
+	// Empty settings auth_method with no key infers agent mode, so an empty
+	// config is valid (no spurious key-mode error).
+	cfg6 := &Config{}
+	if errs := Validate(cfg6); len(errs) != 0 {
+		t.Errorf("unexpected errors for an empty config: %v", errs)
+	}
 }

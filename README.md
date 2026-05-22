@@ -143,8 +143,8 @@ Every subcommand accepts these global flags:
 |---|---|
 | `marina` | Open the full-screen dashboard (TTY-only — prints help otherwise) |
 | `marina hosts` | List every configured host |
-| `marina hosts add <name> <addr> [-k key \| --agent] [--agent-socket s] [-p port] [--trust\|--no-trust]` | Register a host; `--agent` uses the SSH agent (e.g. 1Password) instead of a key file. Prompts to trust the SSH key unless `--trust` / `--no-trust` is set |
-| `marina hosts edit <name> [-a addr] [-u user] [-k key \| --agent] [--agent-socket s] [-p port] [--enable\|--disable]` | Change any of a host's fields; only the flags you pass are touched |
+| `marina hosts add <name> <addr> [-k key \| --agent [--agent-socket s]] [-p port] [--trust\|--no-trust]` | Register a host; `--agent` (or a bare `--agent-socket`) uses the SSH agent (e.g. 1Password) instead of a key file. `-k` and the agent flags are mutually exclusive. Prompts to trust the SSH key unless `--trust` / `--no-trust` is set |
+| `marina hosts edit <name> [-a addr] [-u user] [-k key \| --agent [--agent-socket s]] [-p port] [--enable\|--disable]` | Change any of a host's fields; only the flags you pass are touched. `-k` and the agent flags are mutually exclusive |
 | `marina hosts remove <name>` | Delete a host entry |
 | `marina hosts enable <name>` / `marina hosts disable <name>` | Toggle the disabled flag (disabled hosts are skipped by fan-out ops) |
 | `marina hosts test` | Concurrent SSH + Docker connectivity probe per host |
