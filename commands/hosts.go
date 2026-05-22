@@ -203,6 +203,7 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&trust, "trust", false, "Trust the host key without prompting (scripts/CI)")
 	cmd.Flags().BoolVar(&noTrust, "no-trust", false, "Skip trusting the host key entirely")
 	cmd.MarkFlagsMutuallyExclusive("key", "agent")
+	cmd.MarkFlagsMutuallyExclusive("key", "agent-socket")
 	return cmd
 }
 
@@ -271,9 +272,15 @@ Only the flags you pass are changed; the rest are left alone.`,
 			// modes. --key and --agent are mutually exclusive (enforced below).
 			auth := actions.HostAuth{Method: h.AuthMethod, KeyPath: h.SSHKey, AgentSocket: h.SSHAgentSocket}
 			if cmd.Flags().Changed("key") {
-				auth = actions.HostAuth{KeyPath: sshKey}
+				// Touch only the key fields — reassigning the whole struct
+				// would wipe a stored AgentSocket the user didn't pass, breaking
+				// this command's "only what you pass changes" contract. Clearing
+				// the key (--key "") reverts Method to inherit/infer.
+				auth.KeyPath = sshKey
 				if sshKey != "" {
 					auth.Method = config.AuthMethodKey
+				} else {
+					auth.Method = ""
 				}
 			}
 			if cmd.Flags().Changed("agent") && agent {
@@ -317,6 +324,7 @@ Only the flags you pass are changed; the rest are left alone.`,
 	cmd.Flags().BoolVar(&enable, "enable", false, "Enable this host")
 	cmd.Flags().BoolVar(&disable, "disable", false, "Disable this host")
 	cmd.MarkFlagsMutuallyExclusive("key", "agent")
+	cmd.MarkFlagsMutuallyExclusive("key", "agent-socket")
 	return cmd
 }
 

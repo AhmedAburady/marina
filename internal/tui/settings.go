@@ -34,9 +34,9 @@ var settingsAuthOptions = []string{"Default", "Key", "Agent"}
 func settingsAuthValue(idx int) string {
 	switch idx {
 	case 1:
-		return "key"
+		return config.AuthMethodKey
 	case 2:
-		return "agent"
+		return config.AuthMethodAgent
 	default:
 		return ""
 	}
@@ -45,9 +45,9 @@ func settingsAuthValue(idx int) string {
 // settingsAuthIndex maps a stored auth_method to its pill index.
 func settingsAuthIndex(method string) int {
 	switch method {
-	case "key":
+	case config.AuthMethodKey:
 		return 1
-	case "agent":
+	case config.AuthMethodAgent:
 		return 2
 	default:
 		return 0

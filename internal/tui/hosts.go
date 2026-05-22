@@ -381,6 +381,26 @@ func authInitialIndex(method string) int {
 	}
 }
 
+// hostAuthInitialIndex picks the auth pill index for an existing host. An
+// explicit AuthMethod wins; otherwise we infer from the credential actually
+// present — a per-host ssh_key (the legacy state for every pre-agent config)
+// maps to "key" and an agent socket to "agent". This mirrors
+// config.ResolvedAuthMethod and, crucially, stops the edit form from rendering
+// such hosts as "default" and silently clearing their key on submit.
+func hostAuthInitialIndex(h *config.HostConfig) int {
+	if h.AuthMethod != "" {
+		return authInitialIndex(h.AuthMethod)
+	}
+	switch {
+	case h.SSHKey != "":
+		return 1
+	case h.SSHAgentSocket != "":
+		return 2
+	default:
+		return 0
+	}
+}
+
 // hostAuthFromForm builds a HostAuth from the auth pill plus the key/socket
 // fields at the given form indices. The pill decides which credential is kept,
 // so a stray value in the unused field is ignored.
@@ -461,7 +481,7 @@ func (s *hostsScreen) openEditForm() {
 		newTextFieldWithValue("address", "host or IP", host, true),
 		newTextFieldWithValue("port", "blank for default (22)", port, false),
 		newTextFieldWithValue("user", "blank for global user", h.User, false),
-		newSelectField("auth", authPillOptions, authInitialIndex(h.AuthMethod)),
+		newSelectField("auth", authPillOptions, hostAuthInitialIndex(h)),
 		newTextFieldWithValue("ssh key", "for Auth=key (blank = global key)", h.SSHKey, false),
 		newTextFieldWithValue("agent socket", "for Auth=agent (blank = $SSH_AUTH_SOCK)", h.SSHAgentSocket, false),
 		newToggleField("status", "Enabled", "Disabled", !h.Disabled),
