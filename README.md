@@ -85,6 +85,7 @@ hosts:
     address: 10.0.0.50
   pve-arr:
     address: 10.0.0.51
+    auth_method: agent           # authenticate via the SSH agent (e.g. 1Password)
   synology:
     address: synology.tail
     user: root
@@ -97,6 +98,8 @@ hosts:
 settings:
   username: username             # default SSH user for every host
   ssh_key: ~/.ssh/id_ed25519     # default SSH key
+  # auth_method: agent           # global default auth: "key" or "agent" (blank = infer)
+  # ssh_agent_socket: ~/...      # pin an agent socket for agent mode (blank = $SSH_AUTH_SOCK)
   prune_after_update: true       # run `docker image prune -f` after applying updates
 
 notifications:
@@ -140,13 +143,13 @@ Every subcommand accepts these global flags:
 |---|---|
 | `marina` | Open the full-screen dashboard (TTY-only — prints help otherwise) |
 | `marina hosts` | List every configured host |
-| `marina hosts add <name> <addr> [-k key] [-p port] [--trust\|--no-trust]` | Register a host; prompts to trust the SSH key unless `--trust` / `--no-trust` is set |
-| `marina hosts edit <name> [-a addr] [-u user] [-k key] [-p port] [--enable\|--disable]` | Change any of a host's fields; only the flags you pass are touched |
+| `marina hosts add <name> <addr> [-k key \| --agent] [--agent-socket s] [-p port] [--trust\|--no-trust]` | Register a host; `--agent` uses the SSH agent (e.g. 1Password) instead of a key file. Prompts to trust the SSH key unless `--trust` / `--no-trust` is set |
+| `marina hosts edit <name> [-a addr] [-u user] [-k key \| --agent] [--agent-socket s] [-p port] [--enable\|--disable]` | Change any of a host's fields; only the flags you pass are touched |
 | `marina hosts remove <name>` | Delete a host entry |
 | `marina hosts enable <name>` / `marina hosts disable <name>` | Toggle the disabled flag (disabled hosts are skipped by fan-out ops) |
 | `marina hosts test` | Concurrent SSH + Docker connectivity probe per host |
 | `marina config path` / `validate` | Print config file path / validate its contents |
-| `marina config set <key> <value>` | Set any of: `username`, `ssh_key`, `prune_after_update`, `gotify.url`, `gotify.token`, `gotify.priority` |
+| `marina config set <key> <value>` | Set any of: `username`, `ssh_key`, `auth_method`, `ssh_agent_socket`, `prune_after_update`, `gotify.url`, `gotify.token`, `gotify.priority` |
 | `marina ps` | List every container, grouped by host, coloured by state |
 | `marina stacks` | List every compose stack across all hosts |
 | `marina start / stop / restart / pull` | Per-container actions |

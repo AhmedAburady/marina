@@ -17,12 +17,42 @@ import (
 const (
 	rowUsername    = 0
 	rowSSHKey      = 1
-	rowPrune       = 2
-	rowGotifyURL   = 3
-	rowGotifyToken = 4
-	rowGotifyPrio  = 5
-	rowSettingsMax = 6
+	rowAuthMethod  = 2 // pill: Default / Key / Agent
+	rowAgentSocket = 3
+	rowPrune       = 4
+	rowGotifyURL   = 5
+	rowGotifyToken = 6
+	rowGotifyPrio  = 7
+	rowSettingsMax = 8
 )
+
+// settingsAuthOptions are the global auth-method pill labels (indexes match
+// settingsAuthValue: 0 = inherit/infer, 1 = key, 2 = agent).
+var settingsAuthOptions = []string{"Default", "Key", "Agent"}
+
+// settingsAuthValue maps a pill index to the config auth_method string.
+func settingsAuthValue(idx int) string {
+	switch idx {
+	case 1:
+		return "key"
+	case 2:
+		return "agent"
+	default:
+		return ""
+	}
+}
+
+// settingsAuthIndex maps a stored auth_method to its pill index.
+func settingsAuthIndex(method string) int {
+	switch method {
+	case "key":
+		return 1
+	case "agent":
+		return 2
+	default:
+		return 0
+	}
+}
 
 // Card (window) geometry. The settings form lives inside a filled card whose
 // lighter background differentiates it from the main body — no borders, pure
@@ -95,19 +125,21 @@ var (
 )
 
 type settingsScreen struct {
-	ctx     context.Context
-	cfg     *config.Config
-	focus   int
-	inputs  [rowSettingsMax]textinput.Model
-	prune   bool
-	saveMsg string
+	ctx        context.Context
+	cfg        *config.Config
+	focus      int
+	inputs     [rowSettingsMax]textinput.Model
+	prune      bool
+	authMethod int
+	saveMsg    string
 }
 
 func newSettingsScreen(ctx context.Context, cfg *config.Config) *settingsScreen {
 	s := &settingsScreen{
-		ctx:   ctx,
-		cfg:   cfg,
-		prune: cfg.Settings.PruneAfterUpdate,
+		ctx:        ctx,
+		cfg:        cfg,
+		prune:      cfg.Settings.PruneAfterUpdate,
+		authMethod: settingsAuthIndex(cfg.Settings.AuthMethod),
 	}
 
 	// Inputs are sized to the card's inner width so every input row is the
@@ -138,6 +170,7 @@ func newSettingsScreen(ctx context.Context, cfg *config.Config) *settingsScreen 
 
 	s.inputs[rowUsername] = mkInput("e.g. admin", cfg.Settings.Username)
 	s.inputs[rowSSHKey] = mkInput("e.g. ~/.ssh/id_ed25519", config.ContractPath(cfg.Settings.SSHKey))
+	s.inputs[rowAgentSocket] = mkInput("blank = $SSH_AUTH_SOCK", config.ContractPath(cfg.Settings.SSHAgentSocket))
 	s.inputs[rowGotifyURL] = mkInput("https://notify.example.com", cfg.Notify.Gotify.URL)
 	s.inputs[rowGotifyToken] = mkInput("app token", cfg.Notify.Gotify.Token)
 	s.inputs[rowGotifyToken].EchoMode = textinput.EchoPassword
@@ -167,7 +200,7 @@ func (s *settingsScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 	if k, ok := msg.(tea.KeyPressMsg); ok {
 		return s.handleKey(k)
 	}
-	if s.focus != rowPrune {
+	if s.focus != rowPrune && s.focus != rowAuthMethod {
 		newInput, cmd := s.inputs[s.focus].Update(msg)
 		s.inputs[s.focus] = newInput
 		return s, cmd
@@ -191,11 +224,15 @@ func (s *settingsScreen) handleKey(k tea.KeyPressMsg) (Screen, tea.Cmd) {
 	case "left":
 		if s.focus == rowPrune {
 			s.prune = true
+		} else if s.focus == rowAuthMethod {
+			s.authMethod = (s.authMethod - 1 + len(settingsAuthOptions)) % len(settingsAuthOptions)
 		}
 		return s, nil
 	case "right":
 		if s.focus == rowPrune {
 			s.prune = false
+		} else if s.focus == rowAuthMethod {
+			s.authMethod = (s.authMethod + 1) % len(settingsAuthOptions)
 		}
 		return s, nil
 	case "space":
@@ -203,9 +240,13 @@ func (s *settingsScreen) handleKey(k tea.KeyPressMsg) (Screen, tea.Cmd) {
 			s.prune = !s.prune
 			return s, nil
 		}
+		if s.focus == rowAuthMethod {
+			s.authMethod = (s.authMethod + 1) % len(settingsAuthOptions)
+			return s, nil
+		}
 	}
 
-	if s.focus != rowPrune {
+	if s.focus != rowPrune && s.focus != rowAuthMethod {
 		newInput, cmd := s.inputs[s.focus].Update(k)
 		s.inputs[s.focus] = newInput
 		return s, cmd
@@ -214,11 +255,11 @@ func (s *settingsScreen) handleKey(k tea.KeyPressMsg) (Screen, tea.Cmd) {
 }
 
 func (s *settingsScreen) moveFocus(dir int) {
-	if s.focus != rowPrune {
+	if s.focus != rowPrune && s.focus != rowAuthMethod {
 		s.inputs[s.focus].Blur()
 	}
 	s.focus = (s.focus + dir + rowSettingsMax) % rowSettingsMax
-	if s.focus != rowPrune {
+	if s.focus != rowPrune && s.focus != rowAuthMethod {
 		s.inputs[s.focus].Focus()
 	}
 	s.saveMsg = ""
@@ -228,6 +269,8 @@ func (s *settingsScreen) save() string {
 	pairs := []struct{ key, val string }{
 		{"username", s.inputs[rowUsername].Value()},
 		{"ssh_key", s.inputs[rowSSHKey].Value()},
+		{"auth_method", settingsAuthValue(s.authMethod)},
+		{"ssh_agent_socket", s.inputs[rowAgentSocket].Value()},
 		{"prune_after_update", strconv.FormatBool(s.prune)},
 		{"gotify.url", s.inputs[rowGotifyURL].Value()},
 		{"gotify.token", s.inputs[rowGotifyToken].Value()},
@@ -273,6 +316,14 @@ func (s *settingsScreen) cardContents() string {
 
 	rows = append(rows, s.labelRow(rowSSHKey, "SSH Key", inner))
 	rows = append(rows, s.valueRow(rowSSHKey, inner))
+	rows = append(rows, blankRow(inner))
+
+	rows = append(rows, s.labelRow(rowAuthMethod, "Auth Method", inner))
+	rows = append(rows, s.authPillRow(inner))
+	rows = append(rows, blankRow(inner))
+
+	rows = append(rows, s.labelRow(rowAgentSocket, "SSH Agent Socket", inner))
+	rows = append(rows, s.valueRow(rowAgentSocket, inner))
 	rows = append(rows, blankRow(inner))
 
 	rows = append(rows, s.labelRow(rowPrune, "Prune After Update", inner))
@@ -354,4 +405,19 @@ func (s *settingsScreen) pillRow(width int) string {
 	}
 	gap := sFormCardLine.Render(" ")
 	return row(width, yes+gap+no)
+}
+
+// authPillRow renders the three-state global SSH auth selector
+// (Default / Key / Agent), mirroring pillRow's continuous-fill technique.
+func (s *settingsScreen) authPillRow(width int) string {
+	gap := sFormCardLine.Render(" ")
+	pills := make([]string, len(settingsAuthOptions))
+	for i, l := range settingsAuthOptions {
+		if i == s.authMethod {
+			pills[i] = sPillActive.Render(l)
+		} else {
+			pills[i] = sPillIdle.Render(l)
+		}
+	}
+	return row(width, strings.Join(pills, gap))
 }

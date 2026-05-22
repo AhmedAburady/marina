@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"go.yaml.in/yaml/v3"
 )
 
@@ -18,6 +19,13 @@ type Config struct {
 	Settings Settings               `yaml:"settings"`
 	Notify   NotifyConfig           `yaml:"notifications"`
 }
+
+// SSH authentication methods, used by HostConfig.AuthMethod and
+// Settings.AuthMethod. An empty value means "inherit / infer".
+const (
+	AuthMethodKey   = "key"   // authenticate with a private key file (-i)
+	AuthMethodAgent = "agent" // authenticate via the SSH agent (e.g. 1Password)
+)
 
 // HostConfig represents a single remote Docker host.
 type HostConfig struct {
@@ -29,6 +37,14 @@ type HostConfig struct {
 	// SSHKey is an optional per-host SSH key path override. When empty, the
 	// global Settings.SSHKey is used instead.
 	SSHKey string `yaml:"ssh_key,omitempty"`
+	// AuthMethod selects how this host authenticates: AuthMethodKey or
+	// AuthMethodAgent. Empty inherits Settings.AuthMethod, and failing that is
+	// inferred from whether an SSH key resolves (key when one does, else agent).
+	AuthMethod string `yaml:"auth_method,omitempty"`
+	// SSHAgentSocket optionally pins the SSH agent socket (e.g. 1Password) used
+	// in agent mode, overriding $SSH_AUTH_SOCK. Empty falls back to the global
+	// Settings.SSHAgentSocket, and an empty resolved value means $SSH_AUTH_SOCK.
+	SSHAgentSocket string `yaml:"ssh_agent_socket,omitempty"`
 	// Stacks maps stack name → compose project directory on the remote host.
 	// Used as a fallback for stacks that are fully stopped (no running containers).
 	Stacks map[string]string `yaml:"stacks,omitempty"`
@@ -47,6 +63,48 @@ func (h *HostConfig) ResolvedSSHKey(globalKey string) string {
 	return globalKey
 }
 
+// ResolvedAuthMethod returns the effective auth method for this host:
+// the per-host override, else the global default, else inferred from whether
+// an SSH key resolves (AuthMethodKey when one does, otherwise AuthMethodAgent).
+// The inference preserves marina's prior behaviour: a configured key means key
+// auth, while a keyless host falls through to the agent ($SSH_AUTH_SOCK).
+func (h *HostConfig) ResolvedAuthMethod(s Settings) string {
+	if h.AuthMethod != "" {
+		return h.AuthMethod
+	}
+	if s.AuthMethod != "" {
+		return s.AuthMethod
+	}
+	if h.ResolvedSSHKey(s.SSHKey) != "" {
+		return AuthMethodKey
+	}
+	return AuthMethodAgent
+}
+
+// ResolvedAgentSocket returns the agent socket for this host, falling back to
+// the global socket. An empty result means "use $SSH_AUTH_SOCK".
+func (h *HostConfig) ResolvedAgentSocket(globalSocket string) string {
+	if h.SSHAgentSocket != "" {
+		return h.SSHAgentSocket
+	}
+	return globalSocket
+}
+
+// SSHConfig resolves the transport-level ssh.Config for this host, applying the
+// chosen auth method and global Settings fallbacks. This is the single place
+// that turns config into the credentials handed to the ssh binary.
+func (h *HostConfig) SSHConfig(s Settings) internalssh.Config {
+	c := internalssh.Config{Address: h.SSHAddress(s.Username)}
+	switch h.ResolvedAuthMethod(s) {
+	case AuthMethodAgent:
+		c.UseAgent = true
+		c.AgentSocket = h.ResolvedAgentSocket(s.SSHAgentSocket)
+	default: // AuthMethodKey
+		c.KeyPath = h.ResolvedSSHKey(s.SSHKey)
+	}
+	return c
+}
+
 // SSHAddress returns the full SSH URL for this host, using the provided
 // fallback username when the host has no per-host User set.
 func (h *HostConfig) SSHAddress(globalUser string) string {
@@ -62,8 +120,14 @@ func (h *HostConfig) SSHAddress(globalUser string) string {
 
 // Settings holds global marina settings.
 type Settings struct {
-	Username         string `yaml:"username"`
-	SSHKey           string `yaml:"ssh_key"`
+	Username string `yaml:"username"`
+	SSHKey   string `yaml:"ssh_key"`
+	// AuthMethod is the global default auth method (AuthMethodKey or
+	// AuthMethodAgent) for hosts that don't set their own. Empty infers from
+	// whether ssh_key is set.
+	AuthMethod string `yaml:"auth_method,omitempty"`
+	// SSHAgentSocket is the global default agent socket for agent mode.
+	SSHAgentSocket   string `yaml:"ssh_agent_socket,omitempty"`
 	PruneAfterUpdate bool   `yaml:"prune_after_update"`
 }
 
@@ -129,8 +193,10 @@ func Load(path string) (*Config, error) {
 	// Expand tilde and environment variables in SSH key paths so that the
 	// config example (ssh_key: ~/.ssh/id_ed25519) works out of the box.
 	cfg.Settings.SSHKey = expandPath(cfg.Settings.SSHKey)
+	cfg.Settings.SSHAgentSocket = expandPath(cfg.Settings.SSHAgentSocket)
 	for _, h := range cfg.Hosts {
 		h.SSHKey = expandPath(h.SSHKey)
+		h.SSHAgentSocket = expandPath(h.SSHAgentSocket)
 	}
 
 	return &cfg, nil
@@ -165,10 +231,12 @@ func Save(cfg *Config, path string) error {
 	// (~/... form) even though the in-memory config holds expanded paths.
 	toSave := *cfg
 	toSave.Settings.SSHKey = ContractPath(cfg.Settings.SSHKey)
+	toSave.Settings.SSHAgentSocket = ContractPath(cfg.Settings.SSHAgentSocket)
 	hostsCopy := make(map[string]*HostConfig, len(cfg.Hosts))
 	for k, v := range cfg.Hosts {
 		hc := *v
 		hc.SSHKey = ContractPath(v.SSHKey)
+		hc.SSHAgentSocket = ContractPath(v.SSHAgentSocket)
 		hostsCopy[k] = &hc
 	}
 	toSave.Hosts = hostsCopy
@@ -257,10 +325,28 @@ func expandPath(p string) string {
 // Validate checks the config for obvious errors.
 func Validate(cfg *Config) []string {
 	var errs []string
+	if !validAuthMethod(cfg.Settings.AuthMethod) {
+		errs = append(errs, fmt.Sprintf("settings: auth_method must be %q or %q", AuthMethodKey, AuthMethodAgent))
+	}
 	for name, h := range cfg.Hosts {
 		if h.Address == "" {
 			errs = append(errs, fmt.Sprintf("host %q: address is required", name))
 		}
+		if !validAuthMethod(h.AuthMethod) {
+			errs = append(errs, fmt.Sprintf("host %q: auth_method must be %q or %q", name, AuthMethodKey, AuthMethodAgent))
+			continue
+		}
+		// Key mode needs a key to point -i at; agent mode is fine without a
+		// socket (it falls back to $SSH_AUTH_SOCK).
+		if h.ResolvedAuthMethod(cfg.Settings) == AuthMethodKey && h.ResolvedSSHKey(cfg.Settings.SSHKey) == "" {
+			errs = append(errs, fmt.Sprintf("host %q: auth_method is %q but no ssh_key is set (here or in settings)", name, AuthMethodKey))
+		}
 	}
 	return errs
+}
+
+// validAuthMethod reports whether m is an accepted auth_method value. Empty is
+// valid and means "inherit / infer".
+func validAuthMethod(m string) bool {
+	return m == "" || m == AuthMethodKey || m == AuthMethodAgent
 }

@@ -27,13 +27,10 @@ type hostContext struct {
 // never duplicate that logic.
 func newHostContext(cfg *config.Config, name string, h *config.HostConfig) *hostContext {
 	return &hostContext{
-		cfg:  cfg,
-		host: h,
-		name: name,
-		sshCfg: internalssh.Config{
-			Address: h.SSHAddress(cfg.Settings.Username),
-			KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
-		},
+		cfg:    cfg,
+		host:   h,
+		name:   name,
+		sshCfg: h.SSHConfig(cfg.Settings),
 	}
 }
 

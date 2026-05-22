@@ -54,7 +54,7 @@ internal/
 
 **GlobalFlags** (`commands/root.go`) — every command receives these flags: `-H` (host filter), `-s` (stack filter), `-c` (container filter), `--all` (all hosts). `resolveHost()` / host selector logic in `helpers.go` translates these into a `hostContext`. Root command's `RunE` opens the TUI when `len(args) == 0 && isTTY`.
 
-**SSH execution** (`internal/ssh/ssh.go`) — `Exec()` returns combined stdout+stderr as a string; `Stream()` pipes output line-by-line for logs. Auth tries SSH agent (`SSH_AUTH_SOCK`) first, then key file. `known_hosts` verification is always enforced — never skip it.
+**SSH execution** (`internal/ssh/ssh.go`) — `Exec()` returns combined stdout+stderr as a string; `Stream()` pipes output line-by-line for logs. Auth is one of two mutually-exclusive modes per host, resolved by `config.HostConfig.SSHConfig()`: **key mode** (`-i <key> -o IdentitiesOnly=yes`) or **agent mode** (no `IdentitiesOnly`, optional `-o IdentityAgent=<socket>` to pin e.g. the 1Password agent). The mode comes from `auth_method` (`key`/`agent`, empty = infer from whether a key resolves), per-host overriding the global `settings`. `Flags()` is the single place that translates a `ssh.Config` into ssh CLI args, used by both `Exec`/`Stream` and Docker's connhelper. `known_hosts` verification is always enforced — never skip it.
 
 **Docker connectivity** (`internal/docker/client.go`) — `NewClient()` takes a `HostConfig` and dials through SSH using Docker CLI's connhelper. `MaxConnsPerHost: 1` on the transport forces serialization through one SSH pipe (spawning multiple SSH subprocesses crashes on some hosts). `InspectContainer` returns `ImageMeta{Ref, Digests []string, Architecture, OS}` — the slice is critical: Docker accumulates every registry digest the image has ever answered to, and the registry check matches against any of them.
 
@@ -100,13 +100,17 @@ hosts:
   <name>:
     address: <host or IP>
     user: <override>             # optional
-    ssh_key: <path override>     # optional
+    ssh_key: <path override>     # optional (key mode)
+    auth_method: key|agent       # optional; blank = inherit/infer
+    ssh_agent_socket: <socket>   # optional (agent mode); blank = $SSH_AUTH_SOCK
     stacks:                      # optional — surfaces stopped stacks
       <stack>: <remote dir>
 
 settings:
   username: <default user>
   ssh_key: <default key path>
+  auth_method: key|agent         # optional global default; blank = infer from ssh_key
+  ssh_agent_socket: <socket>     # optional global agent socket; blank = $SSH_AUTH_SOCK
   prune_after_update: true       # honored by both `marina update` and TUI Updates apply
 
 notifications:

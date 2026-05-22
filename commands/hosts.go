@@ -93,10 +93,12 @@ func newHostsToggleCmd(gf *GlobalFlags, verb, short string, disabled bool) *cobr
 
 func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 	var (
-		sshKey  string
-		port    int
-		trust   bool
-		noTrust bool
+		sshKey      string
+		agent       bool
+		agentSocket string
+		port        int
+		trust       bool
+		noTrust     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "add <name> <address>",
@@ -128,7 +130,16 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := actions.AddHost(cfg, gf.Config, name, raw, sshKey); err != nil {
+			auth := actions.HostAuth{}
+			switch {
+			case agent:
+				auth.Method = config.AuthMethodAgent
+				auth.AgentSocket = agentSocket
+			case sshKey != "":
+				auth.Method = config.AuthMethodKey
+				auth.KeyPath = sshKey
+			}
+			if err := actions.AddHost(cfg, gf.Config, name, raw, auth); err != nil {
 				return err
 			}
 			hostCfg := cfg.Hosts[name]
@@ -179,21 +190,26 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host")
+	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path for this host (file-based auth)")
+	cmd.Flags().BoolVar(&agent, "agent", false, "Authenticate via the SSH agent (e.g. 1Password) instead of a key file")
+	cmd.Flags().StringVar(&agentSocket, "agent-socket", "", "SSH agent socket for --agent (blank = $SSH_AUTH_SOCK)")
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "SSH port (default 22). Ignored if the address already contains :port")
 	cmd.Flags().BoolVar(&trust, "trust", false, "Trust the host key without prompting (scripts/CI)")
 	cmd.Flags().BoolVar(&noTrust, "no-trust", false, "Skip trusting the host key entirely")
+	cmd.MarkFlagsMutuallyExclusive("key", "agent")
 	return cmd
 }
 
 func newHostsEditCmd(gf *GlobalFlags) *cobra.Command {
 	var (
-		address string
-		user    string
-		sshKey  string
-		port    int
-		enable  bool
-		disable bool
+		address     string
+		user        string
+		sshKey      string
+		agent       bool
+		agentSocket string
+		port        int
+		enable      bool
+		disable     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "edit <name>",
@@ -245,9 +261,25 @@ Only the flags you pass are changed; the rest are left alone.`,
 					newPortStr = strconv.Itoa(port)
 				}
 			}
-			newKey := h.SSHKey
+			// Auth: start from the host's current selection; flags switch
+			// modes. --key and --agent are mutually exclusive (enforced below).
+			auth := actions.HostAuth{Method: h.AuthMethod, KeyPath: h.SSHKey, AgentSocket: h.SSHAgentSocket}
 			if cmd.Flags().Changed("key") {
-				newKey = sshKey
+				auth = actions.HostAuth{KeyPath: sshKey}
+				if sshKey != "" {
+					auth.Method = config.AuthMethodKey
+				}
+			}
+			if cmd.Flags().Changed("agent") && agent {
+				auth.Method = config.AuthMethodAgent
+				auth.KeyPath = ""
+			}
+			if cmd.Flags().Changed("agent-socket") {
+				auth.AgentSocket = agentSocket
+				if agentSocket != "" {
+					auth.Method = config.AuthMethodAgent
+					auth.KeyPath = ""
+				}
 			}
 			newDisabled := h.Disabled
 			if enable {
@@ -263,7 +295,7 @@ Only the flags you pass are changed; the rest are left alone.`,
 			if newPortStr != "" {
 				newAddress = newHost + ":" + newPortStr
 			}
-			if err := actions.UpdateHost(cfg, gf.Config, name, actions.JoinUserAddress(newUser, newAddress), newKey, newDisabled); err != nil {
+			if err := actions.UpdateHost(cfg, gf.Config, name, actions.JoinUserAddress(newUser, newAddress), auth, newDisabled); err != nil {
 				return err
 			}
 			cmd.Printf("Updated host %q\n", name)
@@ -273,9 +305,12 @@ Only the flags you pass are changed; the rest are left alone.`,
 	cmd.Flags().StringVarP(&address, "address", "a", "", "Host address (host only — use --port for the port)")
 	cmd.Flags().IntVarP(&port, "port", "p", 0, "SSH port (0 = default 22)")
 	cmd.Flags().StringVarP(&user, "user", "u", "", "SSH user override (empty string clears)")
-	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path (empty string clears)")
+	cmd.Flags().StringVarP(&sshKey, "key", "k", "", "SSH key path (empty string clears; switches to key auth)")
+	cmd.Flags().BoolVar(&agent, "agent", false, "Switch this host to SSH agent auth")
+	cmd.Flags().StringVar(&agentSocket, "agent-socket", "", "SSH agent socket (implies --agent; blank = $SSH_AUTH_SOCK)")
 	cmd.Flags().BoolVar(&enable, "enable", false, "Enable this host")
 	cmd.Flags().BoolVar(&disable, "disable", false, "Disable this host")
+	cmd.MarkFlagsMutuallyExclusive("key", "agent")
 	return cmd
 }
 

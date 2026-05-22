@@ -423,10 +423,7 @@ func (s *stacksScreen) buildRows(results map[string]HostFetchResult) {
 		if hostCfg == nil {
 			continue
 		}
-		sshCfg := internalssh.Config{
-			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
-			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-		}
+		sshCfg := hostCfg.SSHConfig(s.cfg.Settings)
 		for _, st := range actions.StackGroupsFor(host, res.Containers, hostCfg.Stacks) {
 			out = append(out, stackRow{
 				host:    host,

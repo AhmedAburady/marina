@@ -364,6 +364,37 @@ func (s *hostsScreen) statusCell(r actions.HostRow) string {
 
 // ── Actions ─────────────────────────────────────────────────────────────────
 
+// authPillOptions are the SSH auth choices shown as a pill in host forms.
+// "default" maps to an empty AuthMethod (inherit the global setting). The
+// "key"/"agent" labels match config.AuthMethodKey/Agent verbatim.
+var authPillOptions = []string{"default", "key", "agent"}
+
+// authInitialIndex maps a stored auth method to its pill index.
+func authInitialIndex(method string) int {
+	switch method {
+	case "key":
+		return 1
+	case "agent":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// hostAuthFromForm builds a HostAuth from the auth pill plus the key/socket
+// fields at the given form indices. The pill decides which credential is kept,
+// so a stray value in the unused field is ignored.
+func hostAuthFromForm(f *inlineForm, authIdx, keyIdx, socketIdx int) actions.HostAuth {
+	switch f.SelectValue(authIdx) {
+	case "key":
+		return actions.HostAuth{Method: "key", KeyPath: f.Value(keyIdx)}
+	case "agent":
+		return actions.HostAuth{Method: "agent", AgentSocket: f.Value(socketIdx)}
+	default:
+		return actions.HostAuth{} // inherit global
+	}
+}
+
 // openAddForm creates the inline add-host form. Address and port are split
 // into separate inputs so users typing a non-standard SSH port don't have
 // to remember the "host:port" syntax; the commit path recombines them.
@@ -373,7 +404,9 @@ func (s *hostsScreen) openAddForm() {
 		newFormField("address", "host or IP", true),
 		newFormField("port", "blank for default (22)", false),
 		newFormField("user", "blank for global user", false),
-		newFormField("ssh key", "blank for global key", false),
+		newSelectField("auth", authPillOptions, 0),
+		newFormField("ssh key", "for Auth=key (blank = global key)", false),
+		newFormField("agent socket", "for Auth=agent (blank = $SSH_AUTH_SOCK)", false),
 	})
 	s.mode = hostsModeAdd
 }
@@ -385,14 +418,14 @@ func (s *hostsScreen) commitAdd() (string, error) {
 	address := s.form.Value(1)
 	portStr := s.form.Value(2)
 	user := s.form.Value(3)
-	key := s.form.Value(4)
+	auth := hostAuthFromForm(s.form, 4, 5, 6)
 
 	port, err := actions.ParsePortStr(portStr)
 	if err != nil {
 		return "", err
 	}
 	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
-	if err := actions.AddHost(s.cfg, "", name, raw, key); err != nil {
+	if err := actions.AddHost(s.cfg, "", name, raw, auth); err != nil {
 		return "", err
 	}
 	s.notice = fmt.Sprintf("Added host %q", name)
@@ -428,7 +461,9 @@ func (s *hostsScreen) openEditForm() {
 		newTextFieldWithValue("address", "host or IP", host, true),
 		newTextFieldWithValue("port", "blank for default (22)", port, false),
 		newTextFieldWithValue("user", "blank for global user", h.User, false),
-		newTextFieldWithValue("ssh key", "blank for global key", h.SSHKey, false),
+		newSelectField("auth", authPillOptions, authInitialIndex(h.AuthMethod)),
+		newTextFieldWithValue("ssh key", "for Auth=key (blank = global key)", h.SSHKey, false),
+		newTextFieldWithValue("agent socket", "for Auth=agent (blank = $SSH_AUTH_SOCK)", h.SSHAgentSocket, false),
 		newToggleField("status", "Enabled", "Disabled", !h.Disabled),
 	})
 	s.mode = hostsModeEdit
@@ -442,15 +477,15 @@ func (s *hostsScreen) commitEdit() error {
 	address := s.form.Value(0)
 	portStr := s.form.Value(1)
 	user := s.form.Value(2)
-	key := s.form.Value(3)
-	enabled := s.form.BoolValue(4)
+	auth := hostAuthFromForm(s.form, 3, 4, 5)
+	enabled := s.form.BoolValue(6)
 
 	port, err := actions.ParsePortStr(portStr)
 	if err != nil {
 		return err
 	}
 	raw := actions.JoinUserAddress(user, actions.JoinHostPort(address, port))
-	if err := actions.UpdateHost(s.cfg, "", name, raw, key, !enabled); err != nil {
+	if err := actions.UpdateHost(s.cfg, "", name, raw, auth, !enabled); err != nil {
 		return err
 	}
 	s.notice = fmt.Sprintf("Updated host %q", name)

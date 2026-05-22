@@ -11,6 +11,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/docker"
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/state"
 )
 
@@ -49,19 +50,19 @@ func FetchAllHosts(
 
 	// Build a flat slice so FanOut can range over it cleanly.
 	type hostEntry struct {
-		name, address, sshKey string
+		name string
+		ssh  internalssh.Config
 	}
 	entries := make([]hostEntry, 0, len(targets))
 	for name, h := range targets {
 		entries = append(entries, hostEntry{
-			name:    name,
-			address: h.SSHAddress(cfg.Settings.Username),
-			sshKey:  h.ResolvedSSHKey(cfg.Settings.SSHKey),
+			name: name,
+			ssh:  h.SSHConfig(cfg.Settings),
 		})
 	}
 
 	for r := range FanOut(ctx, entries, 0, func(ctx context.Context, e hostEntry) HostFetchResult {
-		return fetchOneHost(ctx, e.name, e.address, e.sshKey)
+		return fetchOneHost(ctx, e.name, e.ssh)
 	}) {
 		results[r.Host] = r
 	}
@@ -78,12 +79,7 @@ func FetchAllHosts(
 // Persistence is handled by the caller (PersistResults) once all hosts have
 // reported in, so we do one atomic write instead of one per host.
 func FetchHost(ctx context.Context, cfg *config.Config, name string, h *config.HostConfig) HostFetchResult {
-	return fetchOneHost(
-		ctx,
-		name,
-		h.SSHAddress(cfg.Settings.Username),
-		h.ResolvedSSHKey(cfg.Settings.SSHKey),
-	)
+	return fetchOneHost(ctx, name, h.SSHConfig(cfg.Settings))
 }
 
 // stateMu serialises access to state.json. Use RLock for reads, Lock for writes.
@@ -129,13 +125,13 @@ func persistSnapshots(results map[string]HostFetchResult) {
 
 // ── Internals ───────────────────────────────────────────────────────────────
 
-func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchResult {
+func fetchOneHost(ctx context.Context, host string, sshCfg internalssh.Config) HostFetchResult {
 	start := time.Now()
 	defer func() {
 		slog.Debug("fetch.host", "host", host, "elapsed", time.Since(start))
 	}()
 
-	containers, err := fetchLive(ctx, address, sshKey)
+	containers, err := fetchLive(ctx, sshCfg)
 	if err != nil {
 		if cached, cachedAt, ok := loadCachedContainers(host); ok {
 			return HostFetchResult{Host: host, Containers: cached, FromCache: true, CachedAt: cachedAt}
@@ -147,8 +143,8 @@ func fetchOneHost(ctx context.Context, host, address, sshKey string) HostFetchRe
 	return HostFetchResult{Host: host, Containers: containers}
 }
 
-func fetchLive(ctx context.Context, address, sshKey string) ([]container.Summary, error) {
-	c, err := docker.NewClient(ctx, address, sshKey)
+func fetchLive(ctx context.Context, sshCfg internalssh.Config) ([]container.Summary, error) {
+	c, err := docker.NewClient(ctx, sshCfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

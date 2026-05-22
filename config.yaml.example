@@ -3,16 +3,20 @@ hosts:
     address: 10.0.0.50
   pve-arr:
     address: 10.0.0.51
+    auth_method: agent        # use the SSH agent (e.g. 1Password) for this host
   synology:
     address: synology.tail
     user: root
-    ssh_key: ~/.ssh/id_rsa    # per-host key override
+    ssh_key: ~/.ssh/id_rsa    # per-host key override (auth_method defaults to key)
     stacks:
       media: /opt/stacks/media
 
 settings:
   username: username
   ssh_key: ~/.ssh/id_ed25519    # global default SSH key
+  # SSH auth — a host uses the agent OR a key, never both:
+  #   auth_method: agent        # global default: "key" or "agent" (blank = infer from ssh_key)
+  #   ssh_agent_socket: ~/...   # pin a specific agent socket (blank = $SSH_AUTH_SOCK)
   prune_after_update: true
 
 notifications:

@@ -13,7 +13,6 @@ import (
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
-	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
@@ -565,10 +564,7 @@ func (s *updatesScreen) startApply() tea.Cmd {
 			s.appliedFail++
 			continue
 		}
-		sshCfg := internalssh.Config{
-			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
-			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-		}
+		sshCfg := hostCfg.SSHConfig(s.cfg.Settings)
 		key := k.host + "/" + k.stack
 		cmds = append(cmds, SequenceCmds(
 			ComposeExecCmd(s.ctx, sshCfg, dir, "pull", "compose.pull", key),
@@ -605,10 +601,7 @@ func (s *updatesScreen) startPostApplyPrune() tea.Cmd {
 			s.appliedFail++
 			continue
 		}
-		sshCfg := internalssh.Config{
-			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
-			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-		}
+		sshCfg := hostCfg.SSHConfig(s.cfg.Settings)
 		cmds = append(cmds, SequenceCmds(
 			DockerExecCmd(s.ctx, sshCfg, "docker image prune -f", "image.prune", host),
 		))

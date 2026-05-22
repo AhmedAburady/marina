@@ -87,12 +87,15 @@ func newConfigSetCmd(gf *GlobalFlags) *cobra.Command {
 Available keys:
   username             Global default SSH username for all hosts
   ssh_key              Global default SSH key path (tilde and $VAR expanded on load)
+  auth_method          Global default auth method: key, agent, or empty to infer
+  ssh_agent_socket     SSH agent socket for agent mode (blank = $SSH_AUTH_SOCK)
   prune_after_update   Auto-prune after update: true or false
   gotify.url           Gotify server URL
   gotify.token         Gotify app token (plaintext; prefer gotify.token_env)
   gotify.priority      Gotify notification priority (integer)`,
 		Example: `  marina config set username myuser
   marina config set ssh_key ~/.ssh/id_ed25519
+  marina config set auth_method agent
   marina config set prune_after_update true
   marina config set gotify.url https://notify.example.com
   marina config set gotify.priority 5`,

@@ -67,11 +67,8 @@ func FindStackDir(ctx context.Context, cfg *config.Config, host, stack string) (
 	if dir, ok := h.Stacks[stack]; ok {
 		return dir, nil
 	}
-	sshCfg := internalssh.Config{
-		Address: h.SSHAddress(cfg.Settings.Username),
-		KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
-	dc, err := docker.NewClient(ctx, sshCfg.Address, sshCfg.KeyPath)
+	sshCfg := h.SSHConfig(cfg.Settings)
+	dc, err := docker.NewClient(ctx, sshCfg)
 	if err != nil {
 		return "", fmt.Errorf("connect to discover stack dir: %w", err)
 	}
