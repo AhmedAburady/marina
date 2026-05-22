@@ -365,16 +365,16 @@ func (s *hostsScreen) statusCell(r actions.HostRow) string {
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 // authPillOptions are the SSH auth choices shown as a pill in host forms.
-// "default" maps to an empty AuthMethod (inherit the global setting). The
-// "key"/"agent" labels match config.AuthMethodKey/Agent verbatim.
-var authPillOptions = []string{"default", "key", "agent"}
+// "default" maps to an empty AuthMethod (inherit the global setting); the
+// other two reuse config.AuthMethodKey/Agent so the labels can't drift.
+var authPillOptions = []string{"default", config.AuthMethodKey, config.AuthMethodAgent}
 
 // authInitialIndex maps a stored auth method to its pill index.
 func authInitialIndex(method string) int {
 	switch method {
-	case "key":
+	case config.AuthMethodKey:
 		return 1
-	case "agent":
+	case config.AuthMethodAgent:
 		return 2
 	default:
 		return 0
@@ -386,10 +386,10 @@ func authInitialIndex(method string) int {
 // so a stray value in the unused field is ignored.
 func hostAuthFromForm(f *inlineForm, authIdx, keyIdx, socketIdx int) actions.HostAuth {
 	switch f.SelectValue(authIdx) {
-	case "key":
-		return actions.HostAuth{Method: "key", KeyPath: f.Value(keyIdx)}
-	case "agent":
-		return actions.HostAuth{Method: "agent", AgentSocket: f.Value(socketIdx)}
+	case config.AuthMethodKey:
+		return actions.HostAuth{Method: config.AuthMethodKey, KeyPath: f.Value(keyIdx)}
+	case config.AuthMethodAgent:
+		return actions.HostAuth{Method: config.AuthMethodAgent, AgentSocket: f.Value(socketIdx)}
 	default:
 		return actions.HostAuth{} // inherit global
 	}

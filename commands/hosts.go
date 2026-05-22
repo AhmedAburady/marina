@@ -135,6 +135,12 @@ func newHostsAddCmd(gf *GlobalFlags) *cobra.Command {
 			case agent:
 				auth.Method = config.AuthMethodAgent
 				auth.AgentSocket = agentSocket
+			case agentSocket != "":
+				// A socket without --agent still means agent mode — match
+				// `hosts edit`, which treats a standalone --agent-socket the
+				// same way, rather than silently dropping the value.
+				auth.Method = config.AuthMethodAgent
+				auth.AgentSocket = agentSocket
 			case sshKey != "":
 				auth.Method = config.AuthMethodKey
 				auth.KeyPath = sshKey
