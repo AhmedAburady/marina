@@ -13,7 +13,6 @@ import (
 	"github.com/AhmedAburady/marina/internal/actions"
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/registry"
-	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/strutil"
 )
 
@@ -182,15 +181,23 @@ func (s *updatesScreen) Update(msg tea.Msg) (Screen, tea.Cmd) {
 		}
 
 	case SequenceResultsMsg:
-		// Apply-phase results: count successes / failures, then — once every
-		// stack has reported — either fire the post-apply prune pass (when
-		// PruneAfterUpdate is on) or jump straight to the recheck.
-		for _, r := range msg.Results {
-			if r.Err == nil {
-				s.appliedOk++
-			} else {
-				s.appliedFail++
-			}
+		// Stale guard: once finishAndRecheck has moved us out of the applying
+		// phase, ignore any late-arriving results. Without this a straggler
+		// could re-enter the completion logic (where pendingApply() is now 0)
+		// and re-fire the recheck in a loop.
+		if s.phase != phaseUpdatesApplying {
+			return s, nil
+		}
+
+		// Apply-phase results: count one unit per completed sequence (a stack's
+		// pull+up, or a host's prune) — NOT one per step. A stack emits a single
+		// SequenceResultsMsg carrying both pull and up; counting its steps would
+		// overshoot pendingApply()/prunePending and trip the recheck before every
+		// stack has reported, stranding the rest mid-apply.
+		if seqOK(msg.Results) {
+			s.appliedOk++
+		} else {
+			s.appliedFail++
 		}
 
 		if s.pruning {
@@ -565,10 +572,7 @@ func (s *updatesScreen) startApply() tea.Cmd {
 			s.appliedFail++
 			continue
 		}
-		sshCfg := internalssh.Config{
-			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
-			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-		}
+		sshCfg := hostCfg.SSHConfig(s.cfg.Settings)
 		key := k.host + "/" + k.stack
 		cmds = append(cmds, SequenceCmds(
 			ComposeExecCmd(s.ctx, sshCfg, dir, "pull", "compose.pull", key),
@@ -605,10 +609,7 @@ func (s *updatesScreen) startPostApplyPrune() tea.Cmd {
 			s.appliedFail++
 			continue
 		}
-		sshCfg := internalssh.Config{
-			Address: hostCfg.SSHAddress(s.cfg.Settings.Username),
-			KeyPath: hostCfg.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-		}
+		sshCfg := hostCfg.SSHConfig(s.cfg.Settings)
 		cmds = append(cmds, SequenceCmds(
 			DockerExecCmd(s.ctx, sshCfg, "docker image prune -f", "image.prune", host),
 		))
@@ -675,6 +676,18 @@ func (s *updatesScreen) pendingApply() int {
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────
+
+// seqOK reports whether every step in a finished sequence succeeded. A
+// sequence is one applied unit (a stack's pull+up, or a host's prune);
+// SequenceCmds stops on the first error, so any non-nil Err fails the unit.
+func seqOK(results []ActionResultMsg) bool {
+	for _, r := range results {
+		if r.Err != nil {
+			return false
+		}
+	}
+	return true
+}
 
 func emptyToDash(s string) string {
 	if s == "" {

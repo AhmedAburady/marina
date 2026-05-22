@@ -1,0 +1,88 @@
+[config]
+allow_dynamic_context = true
+
+
+[pr_reviewer]
+num_max_findings = 5
+enable_review_labels_security = true
+enable_review_labels_effort = true
+
+
+
+[pr_code_suggestions]
+focus_only_on_problems = false
+suggestions_score_threshold = 5
+num_code_suggestions_per_chunk = 4
+max_number_of_calls = 4
+parallel_calls = true
+persistent_comment = false
+
+[pr_questions]
+use_conversation_history = true
+
+[ignore]
+glob = [
+  # Dependencies
+  "**/vendor/**",
+
+  # Build output & binaries
+  "**/bin/**",
+  "**/dist/**",
+  "**/build/**",
+  "**/*.exe",
+  "**/*.dll",
+  "**/*.so",
+  "**/*.dylib",
+
+  # Test output & coverage
+  "**/coverage/**",
+  "**/*.out",
+  "**/*.cover",
+  "**/test-results/**",
+
+  # Go workspace files
+  "**/go.work",
+  "**/go.work.sum",
+
+  # Generated code — protobuf, mocks, wire, sqlc, etc.
+  "**/*.pb.go",
+  "**/*.pb.gw.go",
+  "**/*.pb.validate.go",
+  "**/*.mock.go",
+  "**/*_gen.go",
+  "**/*.gen.go",
+  "**/wire_gen.go",
+  "**/mock_*.go",
+
+  # Swagger/OpenAPI generated
+  "**/swagger.json",
+  "**/swagger.yaml",
+  "**/docs.go",
+
+  # Embedded static assets
+  "**/public/**",
+  "**/static/**",
+  "*.min.js",
+  "*.min.css",
+
+  # Local/dev configuration
+  "**/.env",
+  "**/.env.*",
+  "**/config.local.yaml",
+  "**/config.local.json",
+
+  # IDE & OS files
+  "**/.idea/**",
+  "**/.vscode/**",
+  "**/.DS_Store",
+
+  # Temporary files
+  "**/tmp/**",
+  "**/temp/**",
+  "**/*.tmp",
+
+  # Docs and non-code
+  "**/*.md",
+  "context/**",
+  "docs/**"
+]

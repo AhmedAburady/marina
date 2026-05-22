@@ -11,10 +11,14 @@ import (
 	"strings"
 )
 
-// Config holds SSH connection parameters.
+// Config holds SSH connection parameters. Authentication is mutually exclusive:
+// agent mode (UseAgent) or key-file mode (KeyPath) — never both. The config
+// layer resolves the chosen auth method down to these primitives.
 type Config struct {
-	Address string // e.g. "ssh://user@host" or "user@host"
-	KeyPath string // optional -i flag
+	Address     string // e.g. "ssh://user@host" or "user@host"
+	KeyPath     string // private key for -i (key mode)
+	UseAgent    bool   // authenticate via the SSH agent instead of a key file
+	AgentSocket string // optional agent socket to pin (-o IdentityAgent=); empty = $SSH_AUTH_SOCK
 }
 
 // Flags returns the -o / -i arguments passed to the system ssh binary for
@@ -28,7 +32,16 @@ func Flags(cfg Config) []string {
 		"-o", "UserKnownHostsFile=~/.ssh/known_hosts",
 		"-o", "BatchMode=yes",
 	}
-	if cfg.KeyPath != "" {
+	switch {
+	case cfg.UseAgent:
+		// Agent mode: let the SSH agent provide identities. We must NOT set
+		// IdentitiesOnly here — that would suppress the agent. Optionally pin a
+		// specific agent socket (e.g. 1Password), overriding $SSH_AUTH_SOCK.
+		if cfg.AgentSocket != "" {
+			out = append(out, "-o", "IdentityAgent="+cfg.AgentSocket)
+		}
+	case cfg.KeyPath != "":
+		// Key mode: use only the given key file, ignoring any agent identities.
 		out = append(out, "-i", cfg.KeyPath, "-o", "IdentitiesOnly=yes")
 	}
 	return out

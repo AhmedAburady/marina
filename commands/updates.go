@@ -19,7 +19,6 @@ import (
 	"github.com/AhmedAburady/marina/internal/config"
 	notifyPkg "github.com/AhmedAburady/marina/internal/notify"
 	"github.com/AhmedAburady/marina/internal/registry"
-	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 	"github.com/AhmedAburady/marina/internal/strutil"
 	"github.com/AhmedAburady/marina/internal/ui"
 	"github.com/spf13/cobra"
@@ -322,10 +321,7 @@ func runUpdateApply(cmd *cobra.Command, gf *GlobalFlags, yes bool) error {
 // failures.
 func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k stackKey, dir string) error {
 	hostCfg := cfg.Hosts[k.Host]
-	sshCfg := internalssh.Config{
-		Address: hostCfg.SSHAddress(cfg.Settings.Username),
-		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	sshCfg := hostCfg.SSHConfig(cfg.Settings)
 	hc := &hostContext{cfg: cfg, host: hostCfg, name: k.Host, sshCfg: sshCfg}
 
 	if dir == "" {
@@ -368,10 +364,7 @@ func runStackUpdate(ctx context.Context, w, ew io.Writer, cfg *config.Config, k 
 // the shared status-line mutex. Delegates to actions.ApplyStackUpdate.
 func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, dir string) error {
 	hostCfg := cfg.Hosts[k.Host]
-	sshCfg := internalssh.Config{
-		Address: hostCfg.SSHAddress(cfg.Settings.Username),
-		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	sshCfg := hostCfg.SSHConfig(cfg.Settings)
 	hc := &hostContext{cfg: cfg, host: hostCfg, name: k.Host, sshCfg: sshCfg}
 	if dir == "" {
 		resolved, err := findStackDir(ctx, hc, k.Stack)
@@ -388,10 +381,7 @@ func runStackUpdateQuiet(ctx context.Context, cfg *config.Config, k stackKey, di
 // accumulate failures.
 func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host string) error {
 	hostCfg := cfg.Hosts[host]
-	sshCfg := internalssh.Config{
-		Address: hostCfg.SSHAddress(cfg.Settings.Username),
-		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	sshCfg := hostCfg.SSHConfig(cfg.Settings)
 	title := fmt.Sprintf("Pruning old images on %q...", host)
 	doneMsg := fmt.Sprintf("Pruned old images on %q.", host)
 
@@ -420,10 +410,7 @@ func runHostPrune(ctx context.Context, w, ew io.Writer, cfg *config.Config, host
 
 func runHostPruneQuiet(ctx context.Context, cfg *config.Config, host string) error {
 	hostCfg := cfg.Hosts[host]
-	sshCfg := internalssh.Config{
-		Address: hostCfg.SSHAddress(cfg.Settings.Username),
-		KeyPath: hostCfg.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	sshCfg := hostCfg.SSHConfig(cfg.Settings)
 	return actions.PruneHost(ctx, sshCfg, io.Discard)
 }
 

@@ -168,12 +168,22 @@ func ParseAddress(raw string) (ParsedAddress, error) {
 	return out, nil
 }
 
+// HostAuth carries the SSH auth selection for AddHost/UpdateHost. Method is "",
+// config.AuthMethodKey, or config.AuthMethodAgent; KeyPath / AgentSocket supply
+// the credential for the matching mode. An empty Method means "inherit / infer"
+// (the resolver decides based on the global default and whether a key is set).
+type HostAuth struct {
+	Method      string
+	KeyPath     string
+	AgentSocket string
+}
+
 // AddHost writes a new host entry to the config. The address argument is
 // parsed by ParseAddress so callers can pass the raw user-entered string
-// untouched. `sshKey` is optional.
+// untouched. The auth selection is optional (zero value = inherit).
 //
 // Returns an error if a host with the same name already exists.
-func AddHost(cfg *config.Config, configPath, name, rawAddress, sshKey string) error {
+func AddHost(cfg *config.Config, configPath, name, rawAddress string, auth HostAuth) error {
 	if name == "" {
 		return fmt.Errorf("name is required")
 	}
@@ -187,9 +197,11 @@ func AddHost(cfg *config.Config, configPath, name, rawAddress, sshKey string) er
 	}
 
 	cfg.Hosts[name] = &config.HostConfig{
-		Address: parsed.Address,
-		User:    parsed.User,
-		SSHKey:  sshKey,
+		Address:        parsed.Address,
+		User:           parsed.User,
+		SSHKey:         auth.KeyPath,
+		AuthMethod:     auth.Method,
+		SSHAgentSocket: auth.AgentSocket,
 	}
 	return config.Save(cfg, configPath)
 }
@@ -200,7 +212,7 @@ func AddHost(cfg *config.Config, configPath, name, rawAddress, sshKey string) er
 // unchanged to leave a field alone.
 //
 // Returns an error if the host does not exist or the address fails to parse.
-func UpdateHost(cfg *config.Config, configPath, name, rawAddress, sshKey string, disabled bool) error {
+func UpdateHost(cfg *config.Config, configPath, name, rawAddress string, auth HostAuth, disabled bool) error {
 	h, ok := cfg.Hosts[name]
 	if !ok {
 		return fmt.Errorf("host %q not found", name)
@@ -211,7 +223,9 @@ func UpdateHost(cfg *config.Config, configPath, name, rawAddress, sshKey string,
 	}
 	h.Address = parsed.Address
 	h.User = parsed.User
-	h.SSHKey = sshKey
+	h.SSHKey = auth.KeyPath
+	h.AuthMethod = auth.Method
+	h.SSHAgentSocket = auth.AgentSocket
 	h.Disabled = disabled
 	return config.Save(cfg, configPath)
 }
@@ -257,10 +271,7 @@ func TestHost(ctx context.Context, cfg *config.Config, name string) TestResult {
 	if !ok {
 		return TestResult{Host: name, Err: fmt.Errorf("host %q not found", name)}
 	}
-	sshCfg := internalssh.Config{
-		Address: h.SSHAddress(cfg.Settings.Username),
-		KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	sshCfg := h.SSHConfig(cfg.Settings)
 	start := time.Now()
 	output, err := internalssh.Exec(ctx, sshCfg, "echo ok")
 	result := TestResult{
@@ -386,8 +397,6 @@ func HostSSHConfig(cfg *config.Config, name string) *internalssh.Config {
 	if !ok {
 		return nil
 	}
-	return &internalssh.Config{
-		Address: h.SSHAddress(cfg.Settings.Username),
-		KeyPath: h.ResolvedSSHKey(cfg.Settings.SSHKey),
-	}
+	c := h.SSHConfig(cfg.Settings)
+	return &c
 }

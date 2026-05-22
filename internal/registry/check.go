@@ -8,6 +8,7 @@ import (
 
 	"github.com/AhmedAburady/marina/internal/config"
 	"github.com/AhmedAburady/marina/internal/docker"
+	internalssh "github.com/AhmedAburady/marina/internal/ssh"
 )
 
 // Candidate describes a container eligible for an update check. It is the
@@ -141,11 +142,11 @@ func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[strin
 
 	for name, h := range targets {
 		wg.Add(1)
-		go func(hostName, address, sshKey string) {
+		go func(hostName string, sshCfg internalssh.Config) {
 			defer wg.Done()
-			items, err := listCandidatesFromHost(ctx, hostName, address, sshKey)
+			items, err := listCandidatesFromHost(ctx, hostName, sshCfg)
 			ch <- hostResult{host: hostName, items: items, err: err}
-		}(name, h.SSHAddress(cfg.Settings.Username), h.ResolvedSSHKey(cfg.Settings.SSHKey))
+		}(name, h.SSHConfig(cfg.Settings))
 	}
 
 	go func() {
@@ -172,8 +173,8 @@ func gatherCandidates(ctx context.Context, cfg *config.Config, targets map[strin
 // listCandidatesFromHost connects to one host and returns all containers as
 // Candidate entries. Inspects each unique image (not each container) to
 // minimize Docker API calls over the SSH pipe.
-func listCandidatesFromHost(ctx context.Context, hostName, address, sshKey string) ([]Candidate, error) {
-	dc, err := docker.NewClient(ctx, address, sshKey)
+func listCandidatesFromHost(ctx context.Context, hostName string, sshCfg internalssh.Config) ([]Candidate, error) {
+	dc, err := docker.NewClient(ctx, sshCfg)
 	if err != nil {
 		return nil, fmt.Errorf("connect: %w", err)
 	}

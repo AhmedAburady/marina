@@ -434,10 +434,7 @@ func (s *pruneScreen) buildApply(selected []string) func() tea.Cmd {
 			if hc == nil {
 				continue
 			}
-			sshCfg := internalssh.Config{
-				Address: hc.SSHAddress(s.cfg.Settings.Username),
-				KeyPath: hc.ResolvedSSHKey(s.cfg.Settings.SSHKey),
-			}
+			sshCfg := hc.SSHConfig(s.cfg.Settings)
 			s.pending[host] = true
 			cmds = append(cmds, pruneExecCmd(s.ctx, sshCfg, host, opts))
 		}

@@ -14,6 +14,7 @@ type fieldKind int
 const (
 	fieldText fieldKind = iota
 	fieldToggle
+	fieldSelect
 )
 
 // formField is one row in an inline form. Most fields are text inputs; the
@@ -28,6 +29,8 @@ type formField struct {
 	boolValue   bool            // kind == fieldToggle
 	onLabel     string          // kind == fieldToggle (e.g. "Enabled")
 	offLabel    string          // kind == fieldToggle (e.g. "Disabled")
+	options     []string        // kind == fieldSelect
+	selected    int             // kind == fieldSelect
 }
 
 // newFormField builds a text-input field with a configured placeholder +
@@ -61,6 +64,21 @@ func newToggleField(label, onLabel, offLabel string, initial bool) formField {
 		boolValue: initial,
 		onLabel:   onLabel,
 		offLabel:  offLabel,
+	}
+}
+
+// newSelectField builds an N-option pill selector (used for multi-choice config
+// like the SSH auth method). `initial` is the starting option index; cycle with
+// space, jump with ←/→.
+func newSelectField(label string, options []string, initial int) formField {
+	if initial < 0 || initial >= len(options) {
+		initial = 0
+	}
+	return formField{
+		kind:     fieldSelect,
+		label:    label,
+		options:  options,
+		selected: initial,
 	}
 }
 
@@ -112,6 +130,19 @@ func (f *inlineForm) BoolValue(i int) bool {
 	return f.fields[i].boolValue
 }
 
+// SelectValue returns the chosen option string of the nth select field, or ""
+// for non-select or out-of-range indexes.
+func (f *inlineForm) SelectValue(i int) string {
+	if i < 0 || i >= len(f.fields) || f.fields[i].kind != fieldSelect {
+		return ""
+	}
+	fld := f.fields[i]
+	if fld.selected < 0 || fld.selected >= len(fld.options) {
+		return ""
+	}
+	return fld.options[fld.selected]
+}
+
 // Update processes a bubbletea message. Returns (submit, cancel, cmd):
 //   - submit == true: user pressed Enter with all required fields filled
 //   - cancel == true: user pressed Esc
@@ -138,6 +169,20 @@ func (f *inlineForm) Update(msg tea.Msg) (submit, cancel bool, cmd tea.Cmd) {
 		// Toggle field keys: space toggles; ←/→ jump to a specific side.
 		// These keys never flow into a text input, so they cannot clash
 		// with typing while the toggle is focused.
+		if f.focus >= 0 && f.focus < len(f.fields) && f.fields[f.focus].kind == fieldSelect {
+			fld := &f.fields[f.focus]
+			if n := len(fld.options); n > 0 {
+				switch k.String() {
+				case "space", "right":
+					fld.selected = (fld.selected + 1) % n
+				case "left":
+					fld.selected = (fld.selected - 1 + n) % n
+				}
+			}
+			// Swallow all other keys so they don't reach the text-input path.
+			return false, false, nil
+		}
+
 		if f.focus >= 0 && f.focus < len(f.fields) && f.fields[f.focus].kind == fieldToggle {
 			switch k.String() {
 			case "space":

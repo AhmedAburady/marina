@@ -21,15 +21,15 @@ type Client struct {
 	inner *dockerclient.Client
 }
 
-// NewClient creates a Docker client connected to the given SSH address
-// (e.g. "ssh://user@10.0.0.50"). It uses Docker CLI's connhelper which
-// shells out to the local ssh binary — the battle-tested production path.
-//
-// sshKeyPath is optional — when non-empty, it is passed as -i to ssh.
-func NewClient(ctx context.Context, address string, sshKeyPath string) (*Client, error) {
+// NewClient creates a Docker client connected to the given SSH target. It uses
+// Docker CLI's connhelper which shells out to the local ssh binary — the
+// battle-tested production path. The whole ssh.Config (address + auth method)
+// is honoured, so key-file and agent auth behave identically to direct exec.
+func NewClient(ctx context.Context, sshCfg internalssh.Config) (*Client, error) {
+	address := sshCfg.Address
 	helper, err := connhelper.GetConnectionHelperWithSSHOpts(
 		address,
-		internalssh.Flags(internalssh.Config{KeyPath: sshKeyPath}),
+		internalssh.Flags(sshCfg),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("ssh connection helper for %s: %w", address, err)

@@ -118,6 +118,8 @@ func renderFormModal(title string, fields []formField, focus int, errMsg, help s
 		switch f.kind {
 		case fieldToggle:
 			rows = append(rows, toggleRow(f))
+		case fieldSelect:
+			rows = append(rows, selectRow(f))
 		default:
 			rows = append(rows, inputRow(f, i == focus, inputWidth))
 		}
@@ -221,6 +223,16 @@ func toggleRow(f formField) string {
 		offPill = renderPill(f.offLabel, true)
 	}
 	return onPill + sDialogGap.Render(" ") + offPill
+}
+
+// selectRow renders an N-option pill selector; the chosen option is the active
+// (highlighted) pill.
+func selectRow(f formField) string {
+	pills := make([]string, len(f.options))
+	for i, opt := range f.options {
+		pills[i] = renderPill(opt, i == f.selected)
+	}
+	return strings.Join(pills, sDialogGap.Render(" "))
 }
 
 // renderPill renders one button in the confirm dialog.
